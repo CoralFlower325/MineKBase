@@ -294,9 +294,10 @@ class Store:
                 "confidence": as_text(qr_data.get("confidence"), "unreviewed"),
                 "captured_at": as_of,
             }]
-            grading = as_dict(manifest.get("grading_reference"))
+            grading = {**as_dict(manifest.get("grading_reference")), "data_origin": "demo", "display_label": "演示数据"}
             help_fixture = as_list(manifest.get("help_content_fixture"))
             presentation = self._presentation(prompt_data.get("presentation_snapshot"))
+            presentation.update({"data_origin": "demo", "display_label": "演示数据"})
             self.conn.execute("INSERT INTO CoursePackRelease(release_id,course_key,created_at) VALUES(?,?,?)", (release, as_text(release_data.get("course_key"), "signals_and_systems"), as_of))
             self.conn.execute("INSERT INTO LearningObjective(learning_objective_id,course_pack_release_id,name,description,observable_criteria,created_at) VALUES(?,?,?,?,?,?)", (objective, release, as_text(lo_data.get("name"), "待补充学习目标"), as_text(lo_data.get("description")), dumps(criteria), as_of))
             self.conn.execute("INSERT INTO Question(question_id,course_pack_release_id,current_question_revision_id,lifecycle_state,created_at) VALUES(?,?,?,?,?)", (question, release, None, "active", as_of))
@@ -307,11 +308,11 @@ class Store:
 
             submitted_at = add_days(as_of, int(history.get("submitted_at_offset_days", -2)))
             debt_kind = history.get("initial_debt_claim") if history.get("initial_debt_claim") in {"wrong", "incomplete", "uncertain"} else "incomplete"
-            response = self._draft({"response_text": history.get("response_text"), "response_selections": history.get("response_selections"), "response_assets": history.get("response_assets"), "completion_claim": history.get("completion_claim"), "external_help_reported": False})
+            response = self._draft({"response_text": history.get("response_text"), "response_selections": history.get("response_selections"), "response_assets": history.get("response_assets"), "completion_claim": history.get("completion_claim"), "external_help_reported": False, "data_origin": "demo", "display_label": "演示数据"})
             attempt = uid("attempt")
             self.conn.execute("INSERT INTO Attempt(attempt_id,question_id,question_revision_id,review_session_id,origin_kind,submission_state,submitted_at,completion_claim,initial_debt_claim,initial_debt_claim_basis,initial_debt_claim_captured_at,response_snapshot,assistance_state,external_help_reported,submit_event_ordinal,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (attempt, question, revision, None, "initial", "submitted", submitted_at, response["completion_claim"], debt_kind, "seed_fixture", submitted_at, dumps({**response, "assistance_state": "none_observed"}), "none_observed", 0, None, as_of))
             reason = {"wrong": "initial_error", "incomplete": "incomplete_attempt", "uncertain": "manual_declaration"}[debt_kind]
-            task = self._schedule_in_tx(question, revision, prompt, {"trigger_ref": uid("trigger"), "trigger_kind": "attempt", "trigger_reason_kind": reason, "attempt_id": attempt, "source_question_revision_id": revision, "captured_at": submitted_at}, as_of)
+            task = self._schedule_in_tx(question, revision, prompt, {"trigger_ref": uid("trigger"), "trigger_kind": "attempt", "trigger_reason_kind": reason, "attempt_id": attempt, "source_question_revision_id": revision, "captured_at": submitted_at, "data_origin": "demo", "display_label": "演示数据"}, as_of)
             # Keep the disposable P0 fixture immediately due at its declared
             # as_of time; real image intakes use the fixed confirmation anchor.
             if task:
@@ -447,32 +448,30 @@ class Store:
             ids.update(as_list(as_dict(loads(attempt["response_snapshot"], {})).get("response_assets")))
         return {asset_id for asset_id in ids if isinstance(asset_id, str)}
 
-    def _sync_confirmed_reference_assets(self, draft, batch_id):
-        """Add newly supplied reference images to an already confirmed card.
-
-        The original question/attempt snapshot stays immutable; a reference
-        image found later is an additive grading input for future comparisons.
-        """
+    def _sync_confirmed_asset_snapshots(self, draft, batch_id):
+        """Sync current role/order presentation without changing history."""
         question_id = as_dict(draft).get("confirmed_question_id")
         if not question_id:
             return
         question = self.one("SELECT current_question_revision_id FROM Question WHERE question_id=?", (question_id,))
-        revision = self.one("SELECT question_revision_id,grading_reference_fixture_snapshot FROM QuestionRevision WHERE question_revision_id=?", (question["current_question_revision_id"],)) if question and question["current_question_revision_id"] else None
+        revision = self.one("SELECT question_revision_id,current_review_prompt_revision_id,question_units,grading_reference_fixture_snapshot FROM QuestionRevision WHERE question_revision_id=?", (question["current_question_revision_id"],)) if question and question["current_question_revision_id"] else None
         if not revision:
             return
+        assets = self.all("SELECT * FROM ImageAsset WHERE batch_id=? AND state='saved' AND path IS NOT NULL AND (role IS NULL OR role!='redo_process') ORDER BY ordinal,created_at,asset_id", (batch_id,))
+        refs = [{"asset_id":a["asset_id"],"role":a["role"],"ordinal":a["ordinal"],"original_filename":a["original_filename"]} for a in assets]
+        presentation_refs = [ref for ref in refs if ref.get("role") in ("question", "mixed")]
         grading = as_dict(loads(revision["grading_reference_fixture_snapshot"], {}))
-        refs = as_list(grading.get("asset_refs"))
-        known = {as_dict(ref).get("asset_id") for ref in refs}
-        added = False
-        for asset in self.all("SELECT asset_id,role,ordinal,original_filename FROM ImageAsset WHERE batch_id=? AND role='reference' AND state='saved' AND path IS NOT NULL ORDER BY ordinal,created_at,asset_id", (batch_id,)):
-            if asset["asset_id"] in known:
-                continue
-            refs.append({"asset_id":asset["asset_id"],"role":"reference","ordinal":asset["ordinal"],"original_filename":asset["original_filename"]})
-            known.add(asset["asset_id"])
-            added = True
-        if added:
-            grading["asset_refs"] = refs
-            self.conn.execute("UPDATE QuestionRevision SET grading_reference_fixture_snapshot=? WHERE question_revision_id=?", (dumps(grading), revision["question_revision_id"]))
+        grading["asset_refs"] = refs
+        grading["question_image_status"] = "已保存题面" if presentation_refs else "待补题面"
+        units = loads(revision["question_units"], [])
+        if isinstance(units, list) and units and isinstance(units[0], dict):
+            units[0]["asset_ids"] = [ref["asset_id"] for ref in presentation_refs]
+        self.conn.execute("UPDATE QuestionRevision SET grading_reference_fixture_snapshot=?,question_units=? WHERE question_revision_id=?", (dumps(grading), dumps(units), revision["question_revision_id"]))
+        prompt = self.one("SELECT presentation_snapshot FROM ReviewPromptRevision WHERE review_prompt_revision_id=?", (revision["current_review_prompt_revision_id"],)) if revision["current_review_prompt_revision_id"] else None
+        presentation = as_dict(loads(prompt["presentation_snapshot"], {})) if prompt else {}
+        presentation["asset_refs"] = presentation_refs
+        if prompt:
+            self.conn.execute("UPDATE ReviewPromptRevision SET presentation_snapshot=? WHERE review_prompt_revision_id=?", (dumps(presentation), revision["current_review_prompt_revision_id"]))
 
     def _intake_detail(self, intake_id):
         row = self.one("SELECT i.*, b.subject_key FROM IntakeItem i JOIN CaptureBatch b ON b.batch_id=i.batch_id WHERE i.intake_id=?", (intake_id,))
@@ -532,7 +531,7 @@ class Store:
         self.conn.execute("UPDATE IntakeItem SET state=?,failure_note=?,updated_at=? WHERE intake_id=?", (state, note, self.clock(), intake_id))
         if batch_id:
             intake = self.one("SELECT draft_fields FROM IntakeItem WHERE intake_id=?", (intake_id,))
-            self._sync_confirmed_reference_assets(loads(intake["draft_fields"], {}) if intake else {}, batch_id)
+            self._sync_confirmed_asset_snapshots(loads(intake["draft_fields"], {}) if intake else {}, batch_id)
         self.commit()
         return self._intake_detail(intake_id)
 
@@ -595,10 +594,10 @@ class Store:
                         except OSError: pass
                     self.conn.execute("DELETE FROM ImageAsset WHERE asset_id=?", (asset_id,))
                     continue
-                # The confirmed presentation and initial Attempt refer to the
-                # original asset roles/order. Keep that history stable; new
-                # redo images are appended through redo_upload instead.
-                if confirmed and (not confirmed_asset_ids or asset_id in confirmed_asset_ids):
+                # Historical Attempt snapshots remain immutable, while the
+                # current Question presentation/grading references can be
+                # corrected after confirmation. Redo assets stay redo assets.
+                if confirmed and asset["role"] == "redo_process":
                     continue
                 role = change.get("role")
                 ordinal = change.get("ordinal")
@@ -626,7 +625,7 @@ class Store:
             incomplete_count = self.one("SELECT COUNT(*) FROM ImageAsset WHERE batch_id=? AND state='incomplete'", (batch_id,))[0]
             next_state = "saved" if saved_count and not incomplete_count else "incomplete"
             self.conn.execute("UPDATE IntakeItem SET state=?,draft_fields=?,updated_at=? WHERE intake_id=?", (next_state, dumps(draft), self.clock(), intake_id))
-            self._sync_confirmed_reference_assets(draft, batch_id)
+            self._sync_confirmed_asset_snapshots(draft, batch_id)
             self.commit()
             return self._intake_detail(intake_id)
         except Exception:
@@ -1156,6 +1155,7 @@ class Store:
         if not revision: return None
         grading = loads(revision["grading_reference_fixture_snapshot"], {})
         if not grading.get("intake_id"): return None
+        data_origin = as_text(grading.get("data_origin")) or "real"
         prompt = self.one("SELECT * FROM ReviewPromptRevision WHERE review_prompt_revision_id=?", (revision["current_review_prompt_revision_id"],))
         if not prompt:
             prompt = self.one("SELECT * FROM ReviewPromptRevision WHERE question_revision_id=? AND revision_state='ready' ORDER BY revision_no DESC LIMIT 1", (revision["question_revision_id"],))
@@ -1163,6 +1163,10 @@ class Store:
         refs = presentation.get("asset_refs") if isinstance(presentation.get("asset_refs"), list) else []
         assets, question_image_status = self._question_assets_from_refs(refs)
         reference_assets = self._reference_assets_from_refs(as_dict(grading).get("asset_refs"))
+        intake_row = self.one("SELECT batch_id FROM IntakeItem WHERE intake_id=?", (grading.get("intake_id"),))
+        editable_assets = []
+        if intake_row:
+            editable_assets = [self._asset_dict(row) for row in self.all("SELECT * FROM ImageAsset WHERE batch_id=? AND state='saved' AND path IS NOT NULL AND (role IS NULL OR role!='redo_process') ORDER BY ordinal,created_at,asset_id", (intake_row["batch_id"],))]
         task = self.one("SELECT * FROM ReviewTask WHERE question_id=? AND status='open' ORDER BY due_at LIMIT 1", (question_id,))
         sources = self.get_question_sources(question_id)
         redo_draft = None
@@ -1174,7 +1178,7 @@ class Store:
             if draft_attempt_id:
                 draft_assets = self._redo_assets(grading.get("intake_id"), as_list(raw_draft.get("response_assets")))
                 redo_draft = {"attempt_id": draft_attempt_id, "review_session_id": active_session["review_session_id"], "review_task_id": active_session["review_task_id"], "response_text": as_text(raw_draft.get("response_text")), "response_assets": [a["asset_id"] for a in draft_assets], "assets": draft_assets}
-        return {"question_id":question_id,"question":dict(question),"question_revision":dict(revision),"question_text":as_text((presentation.get("content") if isinstance(presentation,dict) else "")),"presentation":presentation,"assets":assets,"reference_assets":reference_assets,"question_image_status":question_image_status,"grading":grading,"sources":sources,"next_due_at":task["due_at"] if task else None,"review_task_id":task["review_task_id"] if task else None,"next_task":self._task_summary(task),"redo_draft":redo_draft,"latest_redo_attempt_id":latest_redo["attempt_id"] if latest_redo else None}
+        return {"question_id":question_id,"question":dict(question),"question_revision":dict(revision),"question_text":as_text((presentation.get("content") if isinstance(presentation,dict) else "")),"presentation":presentation,"assets":assets,"editable_assets":editable_assets,"intake_id":grading.get("intake_id"),"reference_assets":reference_assets,"question_image_status":question_image_status,"data_origin":data_origin,"display_label":as_text(grading.get("display_label")) or "真实题目","grading":grading,"sources":sources,"next_due_at":task["due_at"] if task else None,"review_task_id":task["review_task_id"] if task else None,"next_task":self._task_summary(task),"redo_draft":redo_draft,"latest_redo_attempt_id":latest_redo["attempt_id"] if latest_redo else None}
 
     def list_wrong_questions(self):
         rows = self.all("SELECT q.question_id FROM Question q JOIN QuestionRevision qr ON qr.question_revision_id=q.current_question_revision_id WHERE qr.revision_state='confirmed' AND qr.grading_reference_fixture_snapshot LIKE '%intake_id%'")
@@ -1182,7 +1186,7 @@ class Store:
         for row in rows:
             item = self._wrong_dto(row["question_id"])
             if item:
-                result.append({"question_id":item["question_id"],"question_text":item["question_text"],"subject_key":item["grading"].get("subject_key"),"asset_count":len(item["assets"]),"reference_answer":item["grading"].get("reference_answer"),"error_reason":item["grading"].get("error_reason"),"next_due_at":item["next_due_at"]})
+                result.append({"question_id":item["question_id"],"question_text":item["question_text"],"subject_key":item["grading"].get("subject_key"),"asset_count":len(item["assets"]),"reference_answer":item["grading"].get("reference_answer"),"error_reason":item["grading"].get("error_reason"),"next_due_at":item["next_due_at"],"data_origin":item.get("data_origin"),"display_label":item.get("display_label")})
         return result
 
     def get_wrong_question(self, question_id):
@@ -1925,7 +1929,8 @@ class Store:
             refs = presentation.get("asset_refs") if isinstance(presentation, dict) else []
             question_assets, question_image_status = self._question_assets_from_refs(refs)
             grading = as_dict(loads(revision["grading_reference_fixture_snapshot"], {})) if revision else {}
-            result.append({"review_task_id":row["review_task_id"],"question_id":row["question_id"],"question_text":as_text(presentation.get("content")) if isinstance(presentation, dict) else "","question_assets":question_assets,"question_image_status":question_image_status,"is_image_intake":bool(grading.get("intake_id")),"review_round":row["review_round"],"reason_kind":row["reason_kind"],"due_at":row["due_at"],"status":row["status"],"state":"due"})
+            data_origin = as_text(grading.get("data_origin")) or ("real" if grading.get("intake_id") else "legacy")
+            result.append({"review_task_id":row["review_task_id"],"question_id":row["question_id"],"question_text":as_text(presentation.get("content")) if isinstance(presentation, dict) else "","question_assets":question_assets,"question_image_status":question_image_status,"is_image_intake":bool(grading.get("intake_id")),"data_origin":data_origin,"display_label":as_text(grading.get("display_label")) or ("演示/兼容" if data_origin in ("demo", "legacy") else "真实题目"),"review_round":row["review_round"],"reason_kind":row["reason_kind"],"due_at":row["due_at"],"status":row["status"],"state":"due"})
         # Keep a real image intake ahead of an optional demo/legacy task when
         # the singular UI asks for the next item, while still returning every
         # due row to callers of the plural endpoint.
@@ -1947,6 +1952,11 @@ class Store:
             prompt = self.one("SELECT presentation_snapshot FROM ReviewPromptRevision WHERE review_prompt_revision_id=?", (item.get("review_prompt_revision_id"),)) if item.get("review_prompt_revision_id") else None
             presentation = loads(prompt["presentation_snapshot"], {}) if prompt else {}
             item["question_text"] = as_text(presentation.get("content")) if isinstance(presentation, dict) else ""
+            revision = self.one("SELECT grading_reference_fixture_snapshot FROM QuestionRevision WHERE question_revision_id=?", (item.get("question_revision_id"),)) if item.get("question_revision_id") else None
+            grading = as_dict(loads(revision["grading_reference_fixture_snapshot"], {})) if revision else {}
+            data_origin = as_text(grading.get("data_origin")) or ("real" if grading.get("intake_id") else "legacy")
+            item["data_origin"] = data_origin
+            item["display_label"] = as_text(grading.get("display_label")) or ("演示/兼容" if data_origin in ("demo", "legacy") else "真实题目")
             items.append(item)
         objectives = []
         for row in self.all("SELECT * FROM LearnerObjectiveProjection"):
