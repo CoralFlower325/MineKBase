@@ -435,7 +435,10 @@ class Store:
         row = self.one("SELECT i.*, b.subject_key FROM IntakeItem i JOIN CaptureBatch b ON b.batch_id=i.batch_id WHERE i.intake_id=?", (intake_id,))
         if not row:
             raise DomainError("not_found", "intake not found", {"intake_id": intake_id})
+        confirmed = bool(loads(row["draft_fields"], {}).get("confirmed_question_id"))
         assets = [self._asset_dict(r) for r in self.all("SELECT * FROM ImageAsset WHERE batch_id=? ORDER BY ordinal, created_at, asset_id", (row["batch_id"],))]
+        for asset in assets:
+            asset["locked"] = confirmed and asset.get("state") == "saved"
         result = dict(row)
         result["draft_fields"] = loads(result.get("draft_fields"), {})
         result["assets"] = assets
@@ -535,6 +538,8 @@ class Store:
                 if not asset:
                     continue
                 if change.get("delete"):
+                    if loads(row["draft_fields"], {}).get("confirmed_question_id"):
+                        continue
                     if asset["path"]:
                         try: (ROOT / asset["path"]).unlink(missing_ok=True)
                         except OSError: pass
