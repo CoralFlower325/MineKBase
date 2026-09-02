@@ -296,7 +296,7 @@ GET   /api/reviews/due                   # 到期题面和日期
 
 ### B. 一题分析草稿（已完成）
 
-已把多图送入统一的分析入口，接入现有云端模型配置、三种协议适配和回退。分析结果写入 `draft_fields`：`question_text`、`reference_answer`、`subject_key`、`chapter`、`knowledge_point`、`question_type`、`error_reason`、`error_breakpoint`、`correct_approach` 和 `raw_analysis`；普通文本/Markdown 也可解析，原始回答始终保留。重试只补充空白候选，不静默覆盖用户已编辑的字段。无可用模型时只保留/查看 intake，模型恢复后可重试。用户上传标准答案或手工补全只是候选来源；答案和诊断的确认属于 C 的用户动作，当前代码仍会提示缺失字段，后续收口时不应把这变成技术阻断。本阶段不接共享 RAG，C 阶段再加入资料召回。
+已把多图送入统一的分析入口，接入现有云端模型配置、三种协议适配和回退。分析结果写入 `draft_fields`：`question_text`、`reference_answer`、`subject_key`、`chapter`、`knowledge_point`、`question_type`、`error_reason`、`error_breakpoint`、`correct_approach` 和 `raw_analysis`；普通文本/Markdown 也可解析，原始回答始终保留。重试只补充空白候选，不静默覆盖用户已编辑的字段。无可用模型时只保留/查看 intake，模型恢复后可重试。用户上传标准答案或手工补全只是候选来源；答案和诊断的确认属于 C 的用户动作，空字段也可继续确认并以“待补充”留在正式快照，不用技术门禁阻断上传、重试或入库。本阶段不接共享 RAG，C 阶段再加入资料召回。
 
 实现映射：`IntakeItem.state` 只表示原图保存完整性（`raw/saved/incomplete`），分析过程和结果放在 `draft_fields.analysis_status`（`analyzing/draft/failed`），不再增加另一张分析表或状态服务。
 
@@ -304,7 +304,7 @@ GET   /api/reviews/due                   # 到期题面和日期
 
 已接通 `resolve_intake` 和 `confirm_intake`：使用现有 SourcePassage FTS/已确认题目做轻量候选召回，候选结果回到 intake 草稿供用户编辑；确认动作会创建 Question、确认版 QuestionRevision、ReviewPromptRevision、初始 Attempt 和首个 +3 天 ReviewTask。确认后的正式错题列表/详情、题面图片过滤和所选 passage 的 QuestionSourceLink 也已接入。没有新增 RAG 服务或业务表。
 
-仍需收口的是真实可用性，而不是继续扩架构：确认缺少答案/诊断时仍有提示性业务分支，候选题目按钮仍有重复处理和答案标量提取问题，未指定角色时的题面回退规则还需明确。当前 FTS 仍是轻量片段/整段召回，不宣称已经解决相似题语义匹配；科目元数据和数学↔专业课轻跨科先保持可空候选，等真实资料证明需要再补。
+仍需收口的是真实可用性，而不是继续扩架构：普通“答案：”或 Markdown 答案标题仍需补齐解析别名，未指定角色时的题面回退规则还需避免静默采用过程/答案图。候选选择已统一处理并保存纯答案文本；确认缺少诊断不再阻断。当前 FTS 仍是轻量片段/整段召回，不宣称已经解决相似题语义匹配；科目元数据和数学↔专业课轻跨科先保持可空候选，等真实资料证明需要再补。
 
 ### D. 回测图片闭环
 
@@ -361,7 +361,7 @@ GET   /api/reviews/due                   # 到期题面和日期
 
 ### 当前代码还没有（不能假装已完成）
 
-- C 尚余一个小的用户路径收口：去掉缺字段提示式阻断、合并候选点击处理并提取纯答案文本，明确未指定角色的题面回退；
+- C 尚余一个小的用户路径收口：补齐普通“答案：”/Markdown 标题解析，明确未指定角色的题面回退；
 - FTS 仍不是语义相似题召回，科目过滤/数学↔专业课轻跨科仍是可后置增强；
 - 回测过程图上传、Attempt 提交后的比较和诊断编辑；
 - 3/7/10/14 天后续任务链和 macOS 通知；
