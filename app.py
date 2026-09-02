@@ -489,7 +489,7 @@ class Store:
         result["batch_id"] = row["batch_id"]
         return result
 
-    def _save_uploads(self, intake_id, files, subject_key=None):
+    def _save_uploads(self, intake_id, files, subject_key=None, allow_redo=False):
         files = files or []
         created = self.clock()
         batch_id = None
@@ -513,9 +513,10 @@ class Store:
             filename = (file.get("filename") or "image").strip() or "image"
             mime = file.get("mime") or mimetypes.guess_type(filename)[0] or "application/octet-stream"
             asset_id = uid("asset")
-            # Initial intake uploads never create redo_process assets; that
-            # role is reserved for the dedicated redo upload path.
-            role = file.get("role") if file.get("role") in IMAGE_ROLES and file.get("role") != "redo_process" else None
+            # Ordinary intake uploads never create redo_process assets. The
+            # dedicated redo path opts in explicitly for its internal files.
+            requested_role = file.get("role")
+            role = requested_role if requested_role in IMAGE_ROLES and (allow_redo or requested_role != "redo_process") else None
             try:
                 data = file.get("data") or b""
                 if not data:
@@ -545,10 +546,10 @@ class Store:
             self.rollback()
             raise
 
-    def append_intake_assets(self, intake_id, files):
+    def append_intake_assets(self, intake_id, files, allow_redo=False):
         self.begin()
         try:
-            return self._save_uploads(intake_id, files)
+            return self._save_uploads(intake_id, files, allow_redo=allow_redo)
         except Exception:
             self.rollback()
             raise
@@ -1248,7 +1249,7 @@ class Store:
         redo_files = [{**as_dict(item), "role": "redo_process"} for item in (files or [])]
         before_ids = as_list(existing_draft.get("response_assets"))
         if redo_files:
-            detail = self.append_intake_assets(intake_id, redo_files)
+            detail = self.append_intake_assets(intake_id, redo_files, allow_redo=True)
             saved_new = [a["asset_id"] for a in detail.get("assets", []) if a.get("role") == "redo_process" and a.get("state") == "saved" and a.get("path")]
         else:
             saved_new = []
