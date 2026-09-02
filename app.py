@@ -513,7 +513,9 @@ class Store:
             filename = (file.get("filename") or "image").strip() or "image"
             mime = file.get("mime") or mimetypes.guess_type(filename)[0] or "application/octet-stream"
             asset_id = uid("asset")
-            role = file.get("role") if file.get("role") in IMAGE_ROLES else None
+            # Initial intake uploads never create redo_process assets; that
+            # role is reserved for the dedicated redo upload path.
+            role = file.get("role") if file.get("role") in IMAGE_ROLES and file.get("role") != "redo_process" else None
             try:
                 data = file.get("data") or b""
                 if not data:
@@ -596,10 +598,15 @@ class Store:
                     continue
                 # Historical Attempt snapshots remain immutable, while the
                 # current Question presentation/grading references can be
-                # corrected after confirmation. Redo assets stay redo assets.
-                if confirmed and asset["role"] == "redo_process":
+                # corrected after confirmation. Keep old redo assets' order
+                # stable, but allow legacy data to be reclassified.
+                if confirmed and asset["role"] == "redo_process" and change.get("role") not in {"question", "my_process", "reference", "mixed"}:
                     continue
-                role = change.get("role")
+                # Omitted role means ordinal-only editing and retains the
+                # persisted role. An explicit empty string clears it.
+                role = change.get("role") if "role" in change else asset["role"]
+                if role == "redo_process" and asset["role"] != "redo_process":
+                    role = asset["role"]
                 ordinal = change.get("ordinal")
                 if role is not None and role != "" and role not in IMAGE_ROLES:
                     raise DomainError("invalid_role", "invalid image role")
@@ -1166,7 +1173,7 @@ class Store:
         intake_row = self.one("SELECT batch_id FROM IntakeItem WHERE intake_id=?", (grading.get("intake_id"),))
         editable_assets = []
         if intake_row:
-            editable_assets = [self._asset_dict(row) for row in self.all("SELECT * FROM ImageAsset WHERE batch_id=? AND state='saved' AND path IS NOT NULL AND (role IS NULL OR role!='redo_process') ORDER BY ordinal,created_at,asset_id", (intake_row["batch_id"],))]
+            editable_assets = [self._asset_dict(row) for row in self.all("SELECT * FROM ImageAsset WHERE batch_id=? AND state='saved' AND path IS NOT NULL ORDER BY ordinal,created_at,asset_id", (intake_row["batch_id"],))]
         task = self.one("SELECT * FROM ReviewTask WHERE question_id=? AND status='open' ORDER BY due_at LIMIT 1", (question_id,))
         sources = self.get_question_sources(question_id)
         redo_draft = None
@@ -1315,14 +1322,11 @@ class Store:
         if not wanted:
             return []
         marks = ",".join("?" for _ in wanted)
-        args = list(wanted)
-        role_sql = ""
-        if roles:
-            role_marks = ",".join("?" for _ in roles)
-            role_sql = f" AND role IN ({role_marks})"
-            args.extend(roles)
-        rows = self.all(f"SELECT * FROM ImageAsset WHERE asset_id IN ({marks}) AND state='saved' AND path IS NOT NULL{role_sql} ORDER BY ordinal,created_at,asset_id", args)
-        return [self._asset_dict(row) for row in rows]
+        rows = self.all(f"SELECT * FROM ImageAsset WHERE asset_id IN ({marks}) AND state='saved' AND path IS NOT NULL", wanted)
+        by_id = {row["asset_id"]: row for row in rows}
+        # Historical snapshots are authoritative: current role and ordinal
+        # edits may annotate an asset, but cannot hide or reorder it here.
+        return [self._asset_dict(by_id[asset_id]) for asset_id in wanted if asset_id in by_id]
 
     def _attempt_dto(self, attempt):
         attempt = dict(attempt)
@@ -1341,8 +1345,8 @@ class Store:
             "review_session_id": attempt.get("review_session_id"), "status": attempt.get("submission_state"),
             "submitted_at": attempt.get("submitted_at"),
             "response_text": as_text(response.get("response_text")),
-            "response_assets": self._attempt_asset_rows(response.get("response_assets"), ("redo_process", "mixed")),
-            "initial_process": {"response_text": as_text(initial_response.get("response_text")), "response_assets": self._attempt_asset_rows(initial_response.get("response_assets"), ("my_process", "mixed"))},
+            "response_assets": self._attempt_asset_rows(response.get("response_assets")),
+            "initial_process": {"response_text": as_text(initial_response.get("response_text")), "response_assets": self._attempt_asset_rows(initial_response.get("response_assets"))},
             "reference_answer": as_text(grading.get("reference_answer")),
             "reference_assets": reference_assets,
             "comparison_draft": comparison,
@@ -1733,7 +1737,7 @@ class Store:
             session_id = uid("session")
             started = self.clock()
             presentation = self._presentation(loads(prompt["presentation_snapshot"], {}))
-            eligibility = {"schema_version": SNAPSHOT, "task_due_at_snapshot": task["due_at"], "eligibility_checked_at": started, "clean_ready": all(block.get("leakage_state") == "clean" for block in presentation["blocks"])}
+            eligibility = {"schema_version": SNAPSHOT, "task_due_at_snapshot": task["due_at"], "eligibility_checked_at": started, "clean_ready": all(block.get("leakage_state") == "clean" for block in presentation["blocks"]), "presentation_snapshot": presentation}
             help_snapshot = as_list(loads(revision["help_content_fixture_snapshot"], []))
             self.conn.execute("INSERT INTO ReviewSession(review_session_id,review_task_id,question_id,question_revision_id,review_prompt_revision_id,prompt_eligibility_snapshot,draft_payload_snapshot,exposure_event_snapshots,visibility_policy_version,help_content_snapshot,prior_attempts_hidden,solutions_hidden,explanations_hidden,objective_hints_hidden,started_at,ended_at,updated_at,status,submitted_attempt_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (session_id, task_id, task["question_id"], task["question_revision_id"], task["review_prompt_revision_id"], dumps(eligibility), dumps(self._draft({})), dumps([]), VISIBILITY, dumps(help_snapshot), 1, 1, 1, 1, started, None, started, "active", None))
             self.commit()
@@ -1745,7 +1749,12 @@ class Store:
     def _session_dto(self, session):
         prompt = self.one("SELECT presentation_snapshot FROM ReviewPromptRevision WHERE review_prompt_revision_id=?", (session["review_prompt_revision_id"],))
         events = as_list(loads(session["exposure_event_snapshots"], []))
-        presentation = self._presentation(loads(prompt["presentation_snapshot"], {}) if prompt else {})
+        eligibility = as_dict(loads(session["prompt_eligibility_snapshot"], {}))
+        # A started session owns the presentation it exposed. Later role
+        # edits update the current Question only and must not remove this
+        # session's original question image.
+        snapshot = eligibility.get("presentation_snapshot") if isinstance(eligibility.get("presentation_snapshot"), dict) else (loads(prompt["presentation_snapshot"], {}) if prompt else {})
+        presentation = self._presentation(snapshot)
         question_assets, question_image_status = self._question_assets_from_refs(presentation.get("asset_refs"))
         question_text = as_text(presentation.get("content"))
         if not question_text:
