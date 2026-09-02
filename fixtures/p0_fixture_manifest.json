@@ -1,0 +1,11 @@
+{
+  "schema_version": "p0-fixture-v1",
+  "course_pack_release": {"key": "release-1", "course_key": "signals_and_systems"},
+  "learning_objective": {"key": "lo-1", "name": "确定连续时间信号积分区间", "description": "给定信号表达式时能正确确定积分上下限与符号", "observable_criteria": ["能正确确定积分区间"]},
+  "question": {"key": "question-1", "release_key": "release-1", "lifecycle_state": "active"},
+  "question_revision": {"key": "qr-1", "question_key": "question-1", "revision_no": 1, "revision_state": "confirmed", "question_units": [{"unit_ref": "whole", "label": "整题"}], "learning_objective_key": "lo-1", "role": "measured", "question_unit_refs": ["whole"], "observable_criteria": ["能正确确定积分区间"], "origin_kind": "manual_seed", "alignment_state": "confirmed", "confidence": "confirmed_by_operator", "captured_at": "2026-09-10T00:00:00Z"},
+  "review_prompt": {"key": "prompt-1", "question_revision_key": "qr-1", "revision_no": 1, "scope": "whole", "revision_state": "ready", "leakage_state": "clean", "unresolved_critical_ambiguities": [], "presentation_snapshot": {"schema_version": "p0-snapshot-v1", "blocks": [{"block_ref": "question", "kind": "text", "content": "设 x(t)=1（0≤t≤2），求积分 ∫x(t)dt 的积分区间与结果。", "leakage_state": "clean"}]}},
+  "grading_reference": {"fixture_ref": "grading-1", "fixture_schema_version": "p0-grading-v1", "ref_kind": "manual_accepted", "accepted_for_grading": true, "grading_policy_version": "evidence-v1", "question_revision_key": "qr-1", "covered_units": ["whole"], "rubric_snapshot": {"answer": "积分区间与符号正确", "criteria": ["能正确确定积分区间"]}, "reference_basis_kind": "human_judgment", "authority_snapshot": {"accepted_by": "local_operator"}, "captured_at": "2026-09-10T00:00:00Z"},
+  "help_content_fixture": [{"content_ref": "hint-1", "event_type": "hint_revealed", "content": "提示：先画出信号的非零区间，再确定积分上下限。", "severity": "hinted"}, {"content_ref": "answer-1", "event_type": "answer_revealed", "content": "未核验答案提示：积分应在信号非零区间内进行。", "severity": "answer_exposed"}],
+  "historical_attempt": {"question_revision_key": "qr-1", "response_text": "我把积分区间写成了 -1 到 1。", "response_selections": [], "response_assets": [], "completion_claim": "incomplete", "initial_debt_claim": "wrong", "submitted_at_offset_days": -2}
+}

@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+.venv/
+venv/
+env/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+*.secret
+
+# Local runtime data
+library.sqlite
+library.sqlite-*
+objects/
+*.log
+
+# macOS / editor files
+.DS_Store
+.idea/
+.vscode/
+
+# Generated output
+dist/
+build/
+coverage/
+.pytest_cache/
