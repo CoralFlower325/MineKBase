@@ -31,6 +31,7 @@ EVIDENCE = "evidence-v1"
 VISIBILITY = "visibility-v1"
 IMAGE_ROLES = {"question", "my_process", "reference", "redo_process", "mixed"}
 SUBJECT_KEYS = {"math", "english", "politics", "professional"}
+REVIEW_OFFSETS = (3, 7, 10, 14)
 
 TASK_PRIORITY = [
     "awaiting_assessment",
@@ -49,17 +50,6 @@ SCENARIOS = [
     "P0-S5-assisted-or-unassessed",
     "P0-S6-finalize-chain",
 ]
-SCHEDULE_POLICY = {
-    "initial_error_delay_days": 2,
-    "incomplete_attempt_delay_days": 2,
-    "manual_declaration_delay_days": 2,
-    "awaiting_assessment_delay_days": 3,
-    "assisted_retry_delay_days": 3,
-    "retry_after_fail_delay_days": 2,
-    "independent_confirmation_days": [7, 21],
-}
-
-
 def uid(prefix: str) -> str:
     return f"{prefix}-{uuid.uuid4()}"
 
@@ -322,6 +312,10 @@ class Store:
             self.conn.execute("INSERT INTO Attempt(attempt_id,question_id,question_revision_id,review_session_id,origin_kind,submission_state,submitted_at,completion_claim,initial_debt_claim,initial_debt_claim_basis,initial_debt_claim_captured_at,response_snapshot,assistance_state,external_help_reported,submit_event_ordinal,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (attempt, question, revision, None, "initial", "submitted", submitted_at, response["completion_claim"], debt_kind, "seed_fixture", submitted_at, dumps({**response, "assistance_state": "none_observed"}), "none_observed", 0, None, as_of))
             reason = {"wrong": "initial_error", "incomplete": "incomplete_attempt", "uncertain": "manual_declaration"}[debt_kind]
             task = self._schedule_in_tx(question, revision, prompt, {"trigger_ref": uid("trigger"), "trigger_kind": "attempt", "trigger_reason_kind": reason, "attempt_id": attempt, "source_question_revision_id": revision, "captured_at": submitted_at}, as_of)
+            # Keep the disposable P0 fixture immediately due at its declared
+            # as_of time; real image intakes use the fixed confirmation anchor.
+            if task:
+                self.conn.execute("UPDATE ReviewTask SET due_at=? WHERE review_task_id=?", (as_of, task["review_task_id"]))
             self.commit()
             return {"release_id": release, "objective_id": objective, "question_id": question, "question_revision_id": revision, "prompt_id": prompt, "seed_attempt_id": attempt, "review_task_id": task["review_task_id"], "as_of": as_of}
         except Exception:
@@ -431,14 +425,65 @@ class Store:
         item["media_url"] = f"/media/{item['asset_id']}" if item.get("path") else None
         return item
 
+    def _confirmed_asset_ids(self, draft):
+        """Return only the assets already captured by a confirmed snapshot.
+
+        New files may still be appended to a confirmed intake (for example a
+        reference answer found later); those files remain editable without
+        changing the historical question or initial Attempt.
+        """
+        question_id = as_dict(draft).get("confirmed_question_id")
+        if not question_id:
+            return set()
+        question = self.one("SELECT current_question_revision_id FROM Question WHERE question_id=?", (question_id,))
+        revision = self.one("SELECT grading_reference_fixture_snapshot,current_review_prompt_revision_id FROM QuestionRevision WHERE question_revision_id=?", (question["current_question_revision_id"],)) if question and question["current_question_revision_id"] else None
+        grading = as_dict(loads(revision["grading_reference_fixture_snapshot"], {})) if revision else {}
+        ids = {as_dict(ref).get("asset_id") for ref in as_list(grading.get("asset_refs"))}
+        if not ids and revision and revision["current_review_prompt_revision_id"]:
+            prompt = self.one("SELECT presentation_snapshot FROM ReviewPromptRevision WHERE review_prompt_revision_id=?", (revision["current_review_prompt_revision_id"],))
+            presentation = as_dict(loads(prompt["presentation_snapshot"], {})) if prompt else {}
+            ids = {as_dict(ref).get("asset_id") for ref in as_list(presentation.get("asset_refs"))}
+        for attempt in self.all("SELECT response_snapshot FROM Attempt WHERE question_id=? AND submission_state='submitted'", (question_id,)):
+            ids.update(as_list(as_dict(loads(attempt["response_snapshot"], {})).get("response_assets")))
+        return {asset_id for asset_id in ids if isinstance(asset_id, str)}
+
+    def _sync_confirmed_reference_assets(self, draft, batch_id):
+        """Add newly supplied reference images to an already confirmed card.
+
+        The original question/attempt snapshot stays immutable; a reference
+        image found later is an additive grading input for future comparisons.
+        """
+        question_id = as_dict(draft).get("confirmed_question_id")
+        if not question_id:
+            return
+        question = self.one("SELECT current_question_revision_id FROM Question WHERE question_id=?", (question_id,))
+        revision = self.one("SELECT question_revision_id,grading_reference_fixture_snapshot FROM QuestionRevision WHERE question_revision_id=?", (question["current_question_revision_id"],)) if question and question["current_question_revision_id"] else None
+        if not revision:
+            return
+        grading = as_dict(loads(revision["grading_reference_fixture_snapshot"], {}))
+        refs = as_list(grading.get("asset_refs"))
+        known = {as_dict(ref).get("asset_id") for ref in refs}
+        added = False
+        for asset in self.all("SELECT asset_id,role,ordinal,original_filename FROM ImageAsset WHERE batch_id=? AND role='reference' AND state='saved' AND path IS NOT NULL ORDER BY ordinal,created_at,asset_id", (batch_id,)):
+            if asset["asset_id"] in known:
+                continue
+            refs.append({"asset_id":asset["asset_id"],"role":"reference","ordinal":asset["ordinal"],"original_filename":asset["original_filename"]})
+            known.add(asset["asset_id"])
+            added = True
+        if added:
+            grading["asset_refs"] = refs
+            self.conn.execute("UPDATE QuestionRevision SET grading_reference_fixture_snapshot=? WHERE question_revision_id=?", (dumps(grading), revision["question_revision_id"]))
+
     def _intake_detail(self, intake_id):
         row = self.one("SELECT i.*, b.subject_key FROM IntakeItem i JOIN CaptureBatch b ON b.batch_id=i.batch_id WHERE i.intake_id=?", (intake_id,))
         if not row:
             raise DomainError("not_found", "intake not found", {"intake_id": intake_id})
-        confirmed = bool(loads(row["draft_fields"], {}).get("confirmed_question_id"))
+        draft = loads(row["draft_fields"], {})
+        confirmed = bool(as_dict(draft).get("confirmed_question_id"))
+        confirmed_asset_ids = self._confirmed_asset_ids(draft)
         assets = [self._asset_dict(r) for r in self.all("SELECT * FROM ImageAsset WHERE batch_id=? ORDER BY ordinal, created_at, asset_id", (row["batch_id"],))]
         for asset in assets:
-            asset["locked"] = confirmed and asset.get("state") == "saved"
+            asset["locked"] = confirmed and asset.get("state") == "saved" and (not confirmed_asset_ids or asset["asset_id"] in confirmed_asset_ids)
         result = dict(row)
         result["draft_fields"] = loads(result.get("draft_fields"), {})
         result["assets"] = assets
@@ -485,6 +530,9 @@ class Store:
         state = "incomplete" if failures else "saved"
         note = "; ".join(failures) if failures else None
         self.conn.execute("UPDATE IntakeItem SET state=?,failure_note=?,updated_at=? WHERE intake_id=?", (state, note, self.clock(), intake_id))
+        if batch_id:
+            intake = self.one("SELECT draft_fields FROM IntakeItem WHERE intake_id=?", (intake_id,))
+            self._sync_confirmed_reference_assets(loads(intake["draft_fields"], {}) if intake else {}, batch_id)
         self.commit()
         return self._intake_detail(intake_id)
 
@@ -522,6 +570,8 @@ class Store:
                     raise DomainError("invalid_subject", "invalid subject_key")
                 self.conn.execute("UPDATE CaptureBatch SET subject_key=? WHERE batch_id=?", (subject, batch_id))
             draft = loads(row["draft_fields"], {})
+            confirmed = bool(as_dict(draft).get("confirmed_question_id"))
+            confirmed_asset_ids = self._confirmed_asset_ids(draft)
             if isinstance(payload.get("draft_fields"), dict):
                 draft.update(payload["draft_fields"])
             changed_assets = payload.get("assets") if isinstance(payload.get("assets"), list) else []
@@ -538,12 +588,17 @@ class Store:
                 if not asset:
                     continue
                 if change.get("delete"):
-                    if loads(row["draft_fields"], {}).get("confirmed_question_id"):
+                    if confirmed and (not confirmed_asset_ids or asset_id in confirmed_asset_ids):
                         continue
                     if asset["path"]:
                         try: (ROOT / asset["path"]).unlink(missing_ok=True)
                         except OSError: pass
                     self.conn.execute("DELETE FROM ImageAsset WHERE asset_id=?", (asset_id,))
+                    continue
+                # The confirmed presentation and initial Attempt refer to the
+                # original asset roles/order. Keep that history stable; new
+                # redo images are appended through redo_upload instead.
+                if confirmed and (not confirmed_asset_ids or asset_id in confirmed_asset_ids):
                     continue
                 role = change.get("role")
                 ordinal = change.get("ordinal")
@@ -571,6 +626,7 @@ class Store:
             incomplete_count = self.one("SELECT COUNT(*) FROM ImageAsset WHERE batch_id=? AND state='incomplete'", (batch_id,))[0]
             next_state = "saved" if saved_count and not incomplete_count else "incomplete"
             self.conn.execute("UPDATE IntakeItem SET state=?,draft_fields=?,updated_at=? WHERE intake_id=?", (next_state, dumps(draft), self.clock(), intake_id))
+            self._sync_confirmed_reference_assets(draft, batch_id)
             self.commit()
             return self._intake_detail(intake_id)
         except Exception:
@@ -853,7 +909,7 @@ class Store:
         fields = {"question_text":"", "reference_answer":"", "subject_key": subject_hint if subject_hint in SUBJECT_KEYS else None, "chapter":"", "knowledge_point":"", "question_type":"", "error_reason":"", "error_breakpoint":"", "correct_approach":""}
         aliases = {
             "question_text": r"(?:题面|题目(?:要求)?|question(?:_text)?)",
-            "reference_answer": r"(?:标准答案|模型答案|参考答案|reference[_ ]?answer)",
+            "reference_answer": r"(?:答案|标准答案|模型答案|参考答案|reference[_ ]?answer)",
             "subject_key": r"(?:科目|subject[_ ]?key)", "chapter": r"(?:章节|chapter)", "knowledge_point": r"(?:知识点|knowledge[_ ]?point)", "question_type": r"(?:题型|question[_ ]?type)",
             "error_reason": r"(?:做错原因|错误原因|error[_ ]?reason)", "error_breakpoint": r"(?:解题断点|首次偏离|error[_ ]?breakpoint)", "correct_approach": r"(?:正确思路|correct[_ ]?approach)"
         }
@@ -1052,6 +1108,47 @@ class Store:
         except Exception:
             self.rollback(); raise
 
+    def _task_summary(self, task):
+        if not task:
+            return None
+        return {key: task[key] for key in ("review_task_id", "reason_kind", "review_round", "due_at", "status")}
+
+    def _question_assets_from_refs(self, refs):
+        """Return review-safe question assets, preferring explicitly tagged
+        question images and falling back to mixed images when that is all the
+        intake has.  A mixed fallback remains visible but is labelled so the
+        UI can tell the user it may contain process marks.
+        """
+        refs = [as_dict(ref) for ref in as_list(refs)]
+        tagged = [ref for ref in refs if ref.get("role") == "question"]
+        mixed = [ref for ref in refs if ref.get("role") == "mixed"]
+        selected = tagged + mixed if tagged else mixed
+        assets = []
+        for ref in selected:
+            asset = self.one("SELECT * FROM ImageAsset WHERE asset_id=? AND state='saved' AND path IS NOT NULL", (ref.get("asset_id"),))
+            if not asset:
+                continue
+            item = self._asset_dict(asset)
+            item["review_role"] = ref.get("role") or asset["role"]
+            assets.append(item)
+        if mixed and assets:
+            status = "题面+过程"
+        elif tagged and assets:
+            status = "已保存题面"
+        else:
+            status = "待补题面"
+        return assets, status
+
+    def _reference_assets_from_refs(self, refs):
+        assets = []
+        for ref in [as_dict(ref) for ref in as_list(refs) if as_dict(ref).get("role") == "reference"]:
+            asset = self.one("SELECT * FROM ImageAsset WHERE asset_id=? AND state='saved' AND path IS NOT NULL", (ref.get("asset_id"),))
+            if asset:
+                item = self._asset_dict(asset)
+                item["review_role"] = "reference"
+                assets.append(item)
+        return assets
+
     def _wrong_dto(self, question_id):
         question = self.one("SELECT * FROM Question WHERE question_id=?", (question_id,))
         if not question: return None
@@ -1064,13 +1161,20 @@ class Store:
             prompt = self.one("SELECT * FROM ReviewPromptRevision WHERE question_revision_id=? AND revision_state='ready' ORDER BY revision_no DESC LIMIT 1", (revision["question_revision_id"],))
         presentation = loads(prompt["presentation_snapshot"], {}) if prompt else {}
         refs = presentation.get("asset_refs") if isinstance(presentation.get("asset_refs"), list) else []
-        assets = []
-        for ref in refs:
-            asset = self.one("SELECT * FROM ImageAsset WHERE asset_id=? AND state='saved' AND path IS NOT NULL", (ref.get("asset_id"),))
-            if asset: assets.append(self._asset_dict(asset))
+        assets, question_image_status = self._question_assets_from_refs(refs)
+        reference_assets = self._reference_assets_from_refs(as_dict(grading).get("asset_refs"))
         task = self.one("SELECT * FROM ReviewTask WHERE question_id=? AND status='open' ORDER BY due_at LIMIT 1", (question_id,))
         sources = self.get_question_sources(question_id)
-        return {"question_id":question_id,"question":dict(question),"question_revision":dict(revision),"question_text":as_text((presentation.get("content") if isinstance(presentation,dict) else "")),"presentation":presentation,"assets":assets,"grading":grading,"sources":sources,"next_due_at":task["due_at"] if task else None,"review_task_id":task["review_task_id"] if task else None}
+        redo_draft = None
+        latest_redo = self.one("SELECT attempt_id FROM Attempt WHERE question_id=? AND origin_kind='review' AND submission_state='submitted' AND response_snapshot LIKE '%comparison_draft%' ORDER BY submitted_at DESC LIMIT 1", (question_id,))
+        active_session = self.one("SELECT * FROM ReviewSession WHERE question_id=? AND status='active' ORDER BY updated_at DESC LIMIT 1", (question_id,))
+        if active_session:
+            raw_draft = as_dict(loads(active_session["draft_payload_snapshot"], {}))
+            draft_attempt_id = raw_draft.get("draft_attempt_id")
+            if draft_attempt_id:
+                draft_assets = self._redo_assets(grading.get("intake_id"), as_list(raw_draft.get("response_assets")))
+                redo_draft = {"attempt_id": draft_attempt_id, "review_session_id": active_session["review_session_id"], "review_task_id": active_session["review_task_id"], "response_text": as_text(raw_draft.get("response_text")), "response_assets": [a["asset_id"] for a in draft_assets], "assets": draft_assets}
+        return {"question_id":question_id,"question":dict(question),"question_revision":dict(revision),"question_text":as_text((presentation.get("content") if isinstance(presentation,dict) else "")),"presentation":presentation,"assets":assets,"reference_assets":reference_assets,"question_image_status":question_image_status,"grading":grading,"sources":sources,"next_due_at":task["due_at"] if task else None,"review_task_id":task["review_task_id"] if task else None,"next_task":self._task_summary(task),"redo_draft":redo_draft,"latest_redo_attempt_id":latest_redo["attempt_id"] if latest_redo else None}
 
     def list_wrong_questions(self):
         rows = self.all("SELECT q.question_id FROM Question q JOIN QuestionRevision qr ON qr.question_revision_id=q.current_question_revision_id WHERE qr.revision_state='confirmed' AND qr.grading_reference_fixture_snapshot LIKE '%intake_id%'")
@@ -1085,6 +1189,292 @@ class Store:
         item = self._wrong_dto(question_id)
         if not item: raise DomainError("not_found", "wrong question not found", {"question_id":question_id})
         return item
+
+    def _redo_session(self, question_id, review_task_id=None):
+        """Return an active ReviewSession used as the editable redo draft."""
+        if not review_task_id:
+            task = self.one("SELECT review_task_id FROM ReviewTask WHERE question_id=? AND status='open' ORDER BY due_at, review_round, created_at LIMIT 1", (question_id,))
+            review_task_id = task["review_task_id"] if task else None
+        if not review_task_id:
+            raise DomainError("not_found", "review task not found", {"question_id": question_id})
+        task = self.one("SELECT question_id,status FROM ReviewTask WHERE review_task_id=?", (review_task_id,))
+        if not task or task["question_id"] != question_id:
+            raise DomainError("not_found", "review task not found", {"review_task_id": review_task_id})
+        if task["status"] != "open":
+            raise DomainError("review_closed", "该回测已提交，请使用尚未提交的回测草稿", {"review_task_id": review_task_id})
+        session = self.start_review(review_task_id)
+        if session.get("status") == "submitted":
+            raise DomainError("review_closed", "该回测已提交，请使用尚未提交的回测草稿", {"review_task_id": review_task_id})
+        return session
+
+    def _redo_assets(self, intake_id, asset_ids):
+        row = self.one("SELECT batch_id FROM IntakeItem WHERE intake_id=?", (intake_id,))
+        if not row:
+            return []
+        wanted = [value for value in asset_ids if isinstance(value, str)]
+        if not wanted:
+            return []
+        marks = ",".join("?" for _ in wanted)
+        rows = self.all(f"SELECT * FROM ImageAsset WHERE batch_id=? AND role='redo_process' AND state='saved' AND path IS NOT NULL AND asset_id IN ({marks}) ORDER BY ordinal,created_at,asset_id", [row["batch_id"], *wanted])
+        return [self._asset_dict(item) for item in rows]
+
+    def redo_upload(self, question_id, files, payload=None):
+        """Save redo images and an editable response in ReviewSession JSON."""
+        payload = as_dict(payload)
+        wrong = self.get_wrong_question(question_id)
+        grading = as_dict(wrong.get("grading"))
+        intake_id = grading.get("intake_id")
+        if not intake_id:
+            raise DomainError("not_found", "wrong question intake not found", {"question_id": question_id})
+        session = self._redo_session(question_id, payload.get("review_task_id") or wrong.get("review_task_id"))
+        existing_draft = as_dict(session.get("draft"))
+        draft_attempt_id = existing_draft.get("draft_attempt_id") or uid("attempt")
+        response_text = as_text(existing_draft.get("response_text"))
+        if as_text(payload.get("response_text")).strip():
+            response_text = as_text(payload.get("response_text"))
+        # Force every uploaded file to the redo role. The ordinary intake
+        # uploader still owns persistence and per-file failure handling.
+        redo_files = [{**as_dict(item), "role": "redo_process"} for item in (files or [])]
+        before_ids = as_list(existing_draft.get("response_assets"))
+        if redo_files:
+            detail = self.append_intake_assets(intake_id, redo_files)
+            saved_new = [a["asset_id"] for a in detail.get("assets", []) if a.get("role") == "redo_process" and a.get("state") == "saved" and a.get("path")]
+        else:
+            saved_new = []
+        response_assets = []
+        for asset_id in [*before_ids, *saved_new]:
+            if asset_id not in response_assets:
+                response_assets.append(asset_id)
+        valid_assets = self._redo_assets(intake_id, response_assets)
+        response_assets = [a["asset_id"] for a in valid_assets]
+        draft = self._draft({"draft_attempt_id": draft_attempt_id, "draft_status": "draft", "response_text": response_text, "response_assets": response_assets, "completion_claim": existing_draft.get("completion_claim", "unknown"), "external_help_reported": False})
+        self.begin()
+        try:
+            self.conn.execute("UPDATE ReviewSession SET draft_payload_snapshot=?,updated_at=?,status='active',ended_at=NULL WHERE review_session_id=?", (dumps(draft), self.clock(), session["review_session_id"]))
+            self.commit()
+        except Exception:
+            self.rollback()
+            raise
+        return {"attempt_id": draft_attempt_id, "question_id": question_id, "review_task_id": session["review_task_id"], "review_session_id": session["review_session_id"], "assets": valid_assets, "draft": draft}
+
+    def patch_attempt_draft(self, attempt_id, payload):
+        """Edit only the redo draft; the initial Attempt is never touched."""
+        payload = as_dict(payload)
+        stored_attempt = self.one("SELECT * FROM Attempt WHERE attempt_id=?", (attempt_id,))
+        if stored_attempt:
+            current_response = as_dict(loads(stored_attempt["response_snapshot"], {}))
+            comparison = current_response.get("comparison_draft")
+            if not isinstance(comparison, dict):
+                raise DomainError("review_closed", "该 Attempt 不是可编辑的比较草稿", {"attempt_id": attempt_id})
+            for key in ("error_reason", "error_breakpoint", "correct_approach"):
+                if key in payload:
+                    comparison[key] = as_text(payload.get(key))
+            comparison["status"] = comparison.get("status") or "draft"
+            current_response["comparison_draft"] = comparison
+            self.begin()
+            try:
+                self.conn.execute("UPDATE Attempt SET response_snapshot=? WHERE attempt_id=?", (dumps(current_response), attempt_id))
+                self.commit()
+            except Exception:
+                self.rollback()
+                raise
+            return self._attempt_dto(self.one("SELECT * FROM Attempt WHERE attempt_id=?", (attempt_id,)))
+        session = self.one("SELECT * FROM ReviewSession WHERE review_session_id=?", (attempt_id,))
+        if not session:
+            session = self.one("SELECT * FROM ReviewSession WHERE draft_payload_snapshot LIKE ? ORDER BY updated_at DESC LIMIT 1", (f'%"draft_attempt_id":"{attempt_id}"%',))
+        if not session:
+            raise DomainError("not_found", "redo draft not found", {"attempt_id": attempt_id})
+        if session["status"] == "submitted":
+            raise DomainError("review_closed", "该草稿已提交，不能覆盖正式 Attempt", {"attempt_id": attempt_id})
+        draft = as_dict(loads(session["draft_payload_snapshot"], {}))
+        if "response_text" in payload:
+            draft["response_text"] = as_text(payload.get("response_text"))
+        if isinstance(payload.get("response_assets"), list):
+            draft["response_assets"] = payload.get("response_assets")
+        intake_id = as_dict(self._wrong_dto(session["question_id"]).get("grading")).get("intake_id")
+        valid_assets = self._redo_assets(intake_id, as_list(draft.get("response_assets"))) if intake_id else []
+        draft["response_assets"] = [a["asset_id"] for a in valid_assets]
+        draft["draft_attempt_id"] = as_text(draft.get("draft_attempt_id"), attempt_id)
+        draft["draft_status"] = "draft"
+        draft = self._draft(draft)
+        self.begin()
+        try:
+            self.conn.execute("UPDATE ReviewSession SET draft_payload_snapshot=?,updated_at=?,status='active',ended_at=NULL WHERE review_session_id=?", (dumps(draft), self.clock(), session["review_session_id"]))
+            self.commit()
+        except Exception:
+            self.rollback()
+            raise
+        return {"attempt_id": draft["draft_attempt_id"], "question_id": session["question_id"], "review_task_id": session["review_task_id"], "review_session_id": session["review_session_id"], "assets": valid_assets, "draft": draft}
+
+    def _attempt_asset_rows(self, asset_ids, roles=None):
+        wanted = [value for value in as_list(asset_ids) if isinstance(value, str)]
+        if not wanted:
+            return []
+        marks = ",".join("?" for _ in wanted)
+        args = list(wanted)
+        role_sql = ""
+        if roles:
+            role_marks = ",".join("?" for _ in roles)
+            role_sql = f" AND role IN ({role_marks})"
+            args.extend(roles)
+        rows = self.all(f"SELECT * FROM ImageAsset WHERE asset_id IN ({marks}) AND state='saved' AND path IS NOT NULL{role_sql} ORDER BY ordinal,created_at,asset_id", args)
+        return [self._asset_dict(row) for row in rows]
+
+    def _attempt_dto(self, attempt):
+        attempt = dict(attempt)
+        response = as_dict(loads(attempt.get("response_snapshot"), {}))
+        session = self.one("SELECT review_task_id FROM ReviewSession WHERE review_session_id=?", (attempt.get("review_session_id"),)) if attempt.get("review_session_id") else None
+        initial = self.one("SELECT * FROM Attempt WHERE question_id=? AND origin_kind='initial' ORDER BY created_at,submitted_at LIMIT 1", (attempt["question_id"],))
+        initial_response = as_dict(loads(initial["response_snapshot"], {})) if initial else {}
+        revision = self.one("SELECT grading_reference_fixture_snapshot FROM QuestionRevision WHERE question_revision_id=?", (attempt["question_revision_id"],))
+        grading = as_dict(loads(revision["grading_reference_fixture_snapshot"], {})) if revision else {}
+        comparison = as_dict(response.get("comparison_draft"))
+        reference_assets = self._reference_assets_from_refs(as_dict(grading).get("asset_refs"))
+        next_task = self.one("SELECT * FROM ReviewTask WHERE question_id=? AND status='open' ORDER BY due_at, review_round, created_at LIMIT 1", (attempt["question_id"],))
+        return {
+            "attempt_id": attempt["attempt_id"], "question_id": attempt["question_id"],
+            "review_task_id": session["review_task_id"] if session else None,
+            "review_session_id": attempt.get("review_session_id"), "status": attempt.get("submission_state"),
+            "submitted_at": attempt.get("submitted_at"),
+            "response_text": as_text(response.get("response_text")),
+            "response_assets": self._attempt_asset_rows(response.get("response_assets"), ("redo_process", "mixed")),
+            "initial_process": {"response_text": as_text(initial_response.get("response_text")), "response_assets": self._attempt_asset_rows(initial_response.get("response_assets"), ("my_process", "mixed"))},
+            "reference_answer": as_text(grading.get("reference_answer")),
+            "reference_assets": reference_assets,
+            "comparison_draft": comparison,
+            "next_task": self._task_summary(next_task),
+        }
+
+    def get_attempt(self, attempt_id):
+        attempt = self.one("SELECT * FROM Attempt WHERE attempt_id=?", (attempt_id,))
+        if attempt:
+            return self._attempt_dto(attempt)
+        session = self.one("SELECT * FROM ReviewSession WHERE review_session_id=?", (attempt_id,))
+        if not session:
+            session = self.one("SELECT * FROM ReviewSession WHERE draft_payload_snapshot LIKE ? ORDER BY updated_at DESC LIMIT 1", (f'%"draft_attempt_id":"{attempt_id}"%',))
+        if not session:
+            raise DomainError("not_found", "attempt not found", {"attempt_id": attempt_id})
+        draft = as_dict(loads(session["draft_payload_snapshot"], {}))
+        intake_id = as_dict(self._wrong_dto(session["question_id"]).get("grading")).get("intake_id")
+        assets = self._redo_assets(intake_id, as_list(draft.get("response_assets"))) if intake_id else []
+        return {"attempt_id": as_text(draft.get("draft_attempt_id"), attempt_id), "question_id": session["question_id"], "review_task_id": session["review_task_id"], "review_session_id": session["review_session_id"], "status": "draft", "draft": {"response_text": as_text(draft.get("response_text")), "response_assets": [a["asset_id"] for a in assets], "assets": assets}}
+
+    def _comparison_prompt(self, question_text, initial_text, redo_text, reference_answer, error_reason, error_breakpoint):
+        return "\n".join([
+            "你是回测比较助手。请比较初次解题过程和本次重新作答，不修改正式错题卡。",
+            "区分题目要求、初次过程、本次过程、参考答案和已有错误诊断。指出本次是否修正了初次偏离，并说明依据。",
+            "如果诊断不确定，请标记为‘待确认’，不要伪装成确定结论。只输出普通文本或 Markdown，可使用标题：错误原因、解题断点、正确思路。",
+            f"题面：{question_text or '（未提供）'}",
+            f"初次过程：{initial_text or '（无文字过程，可能只有图片）'}",
+            f"本次过程：{redo_text or '（无文字过程，可能只有图片）'}",
+            f"参考答案：{reference_answer or '待补充'}",
+            f"已有错误原因：{error_reason or '待补充'}",
+            f"已有解题断点：{error_breakpoint or '待补充'}",
+        ])
+
+    def _run_attempt_comparison(self, attempt_id):
+        attempt = self.one("SELECT * FROM Attempt WHERE attempt_id=?", (attempt_id,))
+        if not attempt:
+            return {"status": "failed", "comparison_error": "attempt not found", "raw_analysis": ""}
+        response = as_dict(loads(attempt["response_snapshot"], {}))
+        initial = self.one("SELECT * FROM Attempt WHERE question_id=? AND origin_kind='initial' ORDER BY created_at,submitted_at LIMIT 1", (attempt["question_id"],))
+        initial_response = as_dict(loads(initial["response_snapshot"], {})) if initial else {}
+        revision = self.one("SELECT * FROM QuestionRevision WHERE question_revision_id=?", (attempt["question_revision_id"],))
+        grading = as_dict(loads(revision["grading_reference_fixture_snapshot"], {})) if revision else {}
+        question = self.get_wrong_question(attempt["question_id"])
+        question_text = question.get("question_text")
+        image_parts = []
+        question_assets = [
+            as_dict(ref).get("asset_id")
+            for ref in as_list(as_dict(question.get("presentation")).get("asset_refs"))
+            if as_dict(ref).get("role") in ("question", "mixed")
+        ]
+        reference_assets = [
+            as_dict(ref).get("asset_id")
+            for ref in as_list(grading.get("asset_refs"))
+            if as_dict(ref).get("role") == "reference"
+        ]
+        asset_ids = []
+        for asset_id in [*question_assets, *as_list(initial_response.get("response_assets")), *as_list(response.get("response_assets")), *reference_assets]:
+            if isinstance(asset_id, str) and asset_id not in asset_ids:
+                asset_ids.append(asset_id)
+        for asset_id in asset_ids:
+            row = self.one("SELECT mime,path FROM ImageAsset WHERE asset_id=? AND state='saved' AND path IS NOT NULL", (asset_id,))
+            if not row:
+                continue
+            try:
+                image_parts.append((row["mime"] or "application/octet-stream", (ROOT / row["path"]).read_bytes()))
+            except OSError:
+                continue
+        prompt = self._comparison_prompt(question_text, as_text(initial_response.get("response_text")), as_text(response.get("response_text")), as_text(grading.get("reference_answer")), as_text(grading.get("error_reason")), as_text(grading.get("error_breakpoint")))
+        errors, raw, provider = [], "", None
+        for label, config in [("LLM", self._provider_config("LLM")), ("LLM_FALLBACK", self._provider_config("LLM_FALLBACK"))]:
+            try:
+                raw = self._call_provider(*config, prompt, image_parts)
+                provider = f"{label}:{config[0]}"
+                break
+            except Exception as error:
+                errors.append(f"{label}: {error}")
+        if not raw:
+            return {"status": "failed", "raw_analysis": "", "comparison_error": "；".join(errors)[:500] or "provider unavailable", "reference_answer": as_text(grading.get("reference_answer")), "error_reason": as_text(grading.get("error_reason")), "error_breakpoint": as_text(grading.get("error_breakpoint")), "correct_approach": "", "provider": provider}
+        fields = self._extract_analysis(raw, grading.get("subject_key"))
+        return {"status": "draft", "raw_analysis": raw, "comparison_error": "", "reference_answer": as_text(grading.get("reference_answer")), "error_reason": as_text(fields.get("error_reason")) or as_text(grading.get("error_reason")), "error_breakpoint": as_text(fields.get("error_breakpoint")) or as_text(grading.get("error_breakpoint")), "correct_approach": as_text(fields.get("correct_approach")), "provider": provider}
+
+    def submit_attempt(self, attempt_id, payload=None):
+        payload = as_dict(payload)
+        existing = self.one("SELECT * FROM Attempt WHERE attempt_id=?", (attempt_id,))
+        if existing:
+            return self._attempt_dto(existing)
+        session = self.one("SELECT * FROM ReviewSession WHERE review_session_id=?", (attempt_id,))
+        if not session:
+            session = self.one("SELECT * FROM ReviewSession WHERE draft_payload_snapshot LIKE ? ORDER BY updated_at DESC LIMIT 1", (f'%"draft_attempt_id":"{attempt_id}"%',))
+        if not session:
+            raise DomainError("not_found", "redo draft not found", {"attempt_id": attempt_id})
+        if session["status"] == "submitted" and session["submitted_attempt_id"]:
+            return self.get_attempt(session["submitted_attempt_id"])
+        draft = self._draft(loads(session["draft_payload_snapshot"], {}))
+        if "response_text" in payload:
+            draft["response_text"] = as_text(payload.get("response_text"))
+        if isinstance(payload.get("response_assets"), list):
+            draft["response_assets"] = payload["response_assets"]
+        draft_attempt_id = as_text(draft.get("draft_attempt_id"), attempt_id)
+        draft["draft_attempt_id"] = draft_attempt_id
+        response_assets = self._redo_assets(as_dict(self._wrong_dto(session["question_id"]).get("grading")).get("intake_id"), as_list(draft.get("response_assets")))
+        draft["response_assets"] = [a["asset_id"] for a in response_assets]
+        created = self.clock()
+        response = {"schema_version": SNAPSHOT, "response_text": as_text(draft.get("response_text")), "response_selections": as_list(draft.get("response_selections")), "response_assets": draft["response_assets"], "completion_claim": draft.get("completion_claim", "unknown"), "external_help_reported": bool(draft.get("external_help_reported"))}
+        self.begin()
+        try:
+            self.conn.execute("INSERT INTO Attempt(attempt_id,question_id,question_revision_id,review_session_id,origin_kind,submission_state,submitted_at,completion_claim,initial_debt_claim,initial_debt_claim_basis,initial_debt_claim_captured_at,response_snapshot,assistance_state,external_help_reported,submit_event_ordinal,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (draft_attempt_id, session["question_id"], session["question_revision_id"], session["review_session_id"], "review", "submitted", created, response["completion_claim"], None, None, None, dumps(response), "none_observed", int(response["external_help_reported"]), None, created))
+            self.conn.execute("UPDATE ReviewSession SET status='submitted',submitted_attempt_id=?,ended_at=?,updated_at=?,draft_payload_snapshot=? WHERE review_session_id=?", (draft_attempt_id, created, created, dumps(draft), session["review_session_id"]))
+            self.conn.execute("UPDATE ReviewTask SET status='completed',completed_by_attempt_id=? WHERE review_task_id=?", (draft_attempt_id, session["review_task_id"]))
+            self._schedule_after_review_submit(session, draft_attempt_id, created)
+            self.commit()
+        except sqlite3.IntegrityError:
+            self.rollback()
+            saved = self.one("SELECT * FROM Attempt WHERE attempt_id=?", (draft_attempt_id,))
+            if saved:
+                return self._attempt_dto(saved)
+            raise
+        except Exception:
+            self.rollback()
+            raise
+        try:
+            comparison = self._run_attempt_comparison(draft_attempt_id)
+        except Exception as error:
+            # Submission is already sealed; comparison is a best-effort draft.
+            comparison = {"status": "failed", "raw_analysis": "", "comparison_error": str(error)[:500], "reference_answer": "", "error_reason": "", "error_breakpoint": "", "correct_approach": ""}
+        attempt = self.one("SELECT response_snapshot FROM Attempt WHERE attempt_id=?", (draft_attempt_id,))
+        response = as_dict(loads(attempt["response_snapshot"], {}))
+        response["comparison_draft"] = comparison
+        self.begin()
+        try:
+            self.conn.execute("UPDATE Attempt SET response_snapshot=? WHERE attempt_id=?", (dumps(response), draft_attempt_id))
+            self.commit()
+        except Exception:
+            self.rollback()
+            raise
+        return self._attempt_dto(self.one("SELECT * FROM Attempt WHERE attempt_id=?", (draft_attempt_id,)))
 
     def answer_question(self, payload):
         payload = payload if isinstance(payload, dict) else {}
@@ -1177,22 +1567,10 @@ class Store:
         return question, revision, prompt
 
     def _trigger_due(self, trigger):
-        reason = trigger.get("trigger_reason_kind", "manual_declaration")
-        delays = {
-            "initial_error": SCHEDULE_POLICY["initial_error_delay_days"],
-            "incomplete_attempt": SCHEDULE_POLICY["incomplete_attempt_delay_days"],
-            "manual_declaration": SCHEDULE_POLICY["manual_declaration_delay_days"],
-            "awaiting_assessment": SCHEDULE_POLICY["awaiting_assessment_delay_days"],
-            "assisted_retry": SCHEDULE_POLICY["assisted_retry_delay_days"],
-            "retry_after_fail": SCHEDULE_POLICY["retry_after_fail_delay_days"],
-            "spaced_confirmation": SCHEDULE_POLICY["independent_confirmation_days"][0],
-        }
-        delay = delays.get(reason, 2)
-        if reason == "spaced_confirmation":
-            evidence = self.one("SELECT learning_objective_id FROM EvidenceEvent WHERE evidence_event_id=?", (trigger.get("evidence_event_id"),))
-            if evidence and self.one("SELECT COUNT(*) AS n FROM EvidenceEvent WHERE learning_objective_id=? AND performance_state='success'", (evidence["learning_objective_id"],))["n"] >= 2:
-                delay = SCHEDULE_POLICY["independent_confirmation_days"][1]
-        return add_days(as_text(trigger.get("captured_at"), self.clock()), delay)
+        # All review timing is anchored to the confirmation cycle. This helper
+        # remains for trigger prioritization, but never reintroduces the old
+        # reason-specific +2/+3/+7/+21 offsets.
+        return add_days(as_text(trigger.get("cycle_anchor_at") or trigger.get("captured_at"), self.clock()), REVIEW_OFFSETS[0])
 
     def _merge_triggers(self, snapshots):
         candidates = []
@@ -1202,7 +1580,7 @@ class Store:
             item["trigger_reason_kind"] = reason
             candidates.append((TASK_PRIORITY.index(reason), self._trigger_due(item), item))
         if not candidates:
-            return "manual_declaration", add_days(self.clock(), 2)
+            return "manual_declaration", add_days(self.clock(), REVIEW_OFFSETS[0])
         candidates.sort(key=lambda value: (value[0], value[1]))
         return candidates[0][2]["trigger_reason_kind"], candidates[0][1]
 
@@ -1249,6 +1627,12 @@ class Store:
             trigger["trigger_reason_kind"] = "manual_declaration"
         self._triplet(question_id, revision_id, prompt_id)
         tasks = self.all("SELECT * FROM ReviewTask WHERE question_id=? ORDER BY review_round,created_at", (question_id,))
+        first_task = tasks[0] if tasks else None
+        first_snapshots = as_list(loads(first_task["trigger_snapshots"], [])) if first_task else []
+        anchor = next((as_text(item.get("cycle_anchor_at")) for item in first_snapshots if as_text(item.get("cycle_anchor_at"))), None)
+        anchor = anchor or next((as_text(item.get("captured_at")) for item in first_snapshots if as_text(item.get("captured_at"))), None)
+        anchor = anchor or as_text(trigger.get("cycle_anchor_at") or trigger.get("captured_at"), as_of)
+        trigger["cycle_anchor_at"] = anchor
         for task in tasks:
             for old in as_list(loads(task["trigger_snapshots"], [])):
                 if any(key in trigger and trigger.get(key) and old.get(key) == trigger.get(key) for key in ("attempt_id", "assessment_id", "evidence_event_id", "declaration_id")):
@@ -1257,14 +1641,39 @@ class Store:
         if open_task:
             snapshots = as_list(loads(open_task["trigger_snapshots"], []))
             snapshots.append(trigger)
-            reason, merged_due = self._merge_triggers(snapshots)
-            self.conn.execute("UPDATE ReviewTask SET trigger_snapshots=?,reason_kind=?,due_at=? WHERE review_task_id=?", (dumps(snapshots), reason, min(open_task["due_at"], merged_due), open_task["review_task_id"]))
+            reason, _ = self._merge_triggers(snapshots)
+            expected_due = add_days(anchor, REVIEW_OFFSETS[min(max(int(open_task["review_round"]), 1), len(REVIEW_OFFSETS)) - 1])
+            self.conn.execute("UPDATE ReviewTask SET trigger_snapshots=?,reason_kind=?,due_at=?,schedule_policy_version=? WHERE review_task_id=?", (dumps(snapshots), reason, expected_due, "fixed-3-7-10-14", open_task["review_task_id"]))
             return dict(self.one("SELECT * FROM ReviewTask WHERE review_task_id=?", (open_task["review_task_id"],)))
+        max_round = max((int(task["review_round"]) for task in tasks), default=0)
+        if max_round >= len(REVIEW_OFFSETS):
+            # The fixed cycle ends at +14. Do not create a fifth task.
+            return None
         snapshots = as_list(carry_triggers) + [trigger]
         reason, due = self._merge_triggers(snapshots)
         task_id = uid("task")
-        self.conn.execute("INSERT INTO ReviewTask(review_task_id,question_id,question_revision_id,review_prompt_revision_id,kind,reason_kind,trigger_snapshots,snapshot_schema_version,review_round,due_at,schedule_policy_version,created_at,status,completed_by_attempt_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (task_id, question_id, revision_id, prompt_id, "closed_book_review", reason, dumps(snapshots), SNAPSHOT, max((task["review_round"] for task in tasks), default=0) + 1, due, "inline", as_of, "open", None))
+        review_round = max_round + 1
+        due = add_days(anchor, REVIEW_OFFSETS[review_round - 1])
+        self.conn.execute("INSERT INTO ReviewTask(review_task_id,question_id,question_revision_id,review_prompt_revision_id,kind,reason_kind,trigger_snapshots,snapshot_schema_version,review_round,due_at,schedule_policy_version,created_at,status,completed_by_attempt_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (task_id, question_id, revision_id, prompt_id, "closed_book_review", reason, dumps(snapshots), SNAPSHOT, review_round, due, "fixed-3-7-10-14", as_of, "open", None))
         return dict(self.one("SELECT * FROM ReviewTask WHERE review_task_id=?", (task_id,)))
+
+    def _schedule_after_review_submit(self, session, attempt_id, submitted_at):
+        """Advance the fixed review cycle as soon as a redo is sealed."""
+        trigger = {
+            "trigger_ref": uid("trigger"),
+            "trigger_kind": "attempt",
+            "trigger_reason_kind": "spaced_confirmation",
+            "attempt_id": attempt_id,
+            "source_question_revision_id": session["question_revision_id"],
+            "captured_at": submitted_at,
+        }
+        return self._schedule_in_tx(
+            session["question_id"],
+            session["question_revision_id"],
+            session["review_prompt_revision_id"],
+            trigger,
+            submitted_at,
+        )
 
     def schedule_review(self, payload):
         payload = as_dict(payload)
@@ -1282,6 +1691,8 @@ class Store:
             trigger = self._resolve_trigger(question_id, revision_id, prompt_id, payload.get("trigger_input"), self.clock())
             task = self._schedule_in_tx(question_id, revision_id, prompt_id, trigger, self.clock())
             self.commit()
+            if not task:
+                return {"review_task_id": None, "reason_kind": trigger.get("trigger_reason_kind", "manual_declaration"), "review_round": len(REVIEW_OFFSETS), "due_at": None, "status": "completed"}
             return {key: task[key] for key in ("review_task_id", "reason_kind", "review_round", "due_at", "status")}
         except Exception:
             self.rollback()
@@ -1312,6 +1723,8 @@ class Store:
                 self.conn.execute("UPDATE ReviewSession SET status='active',ended_at=NULL,updated_at=? WHERE review_session_id=?", (resumed, abandoned["review_session_id"]))
                 self.commit()
                 return self._session_dto(self.one("SELECT * FROM ReviewSession WHERE review_session_id=?", (abandoned["review_session_id"],)))
+            if task["status"] != "open":
+                raise DomainError("review_closed", "该回测已提交，请使用尚未提交的回测草稿", {"review_task_id": task_id})
             _, revision, prompt = self._triplet(task["question_id"], task["question_revision_id"], task["review_prompt_revision_id"])
             session_id = uid("session")
             started = self.clock()
@@ -1328,7 +1741,12 @@ class Store:
     def _session_dto(self, session):
         prompt = self.one("SELECT presentation_snapshot FROM ReviewPromptRevision WHERE review_prompt_revision_id=?", (session["review_prompt_revision_id"],))
         events = as_list(loads(session["exposure_event_snapshots"], []))
-        return {"review_session_id": session["review_session_id"], "review_task_id": session["review_task_id"], "status": session["status"], "presentation_snapshot": self._presentation(loads(prompt["presentation_snapshot"], {}) if prompt else {}), "prompt_eligibility_snapshot": loads(session["prompt_eligibility_snapshot"], {}), "draft": loads(session["draft_payload_snapshot"], {}), "exposure_events": [{key: value for key, value in event.items() if key != "content"} for event in events], "assistance_state": "assisted" if events else "none_observed"}
+        presentation = self._presentation(loads(prompt["presentation_snapshot"], {}) if prompt else {})
+        question_assets, question_image_status = self._question_assets_from_refs(presentation.get("asset_refs"))
+        question_text = as_text(presentation.get("content"))
+        if not question_text:
+            question_text = "\n".join(as_text(as_dict(block).get("content")) for block in as_list(presentation.get("blocks")))
+        return {"review_session_id": session["review_session_id"], "review_task_id": session["review_task_id"], "status": session["status"], "presentation_snapshot": presentation, "question_text": question_text, "question_assets": question_assets, "question_image_status": question_image_status, "prompt_eligibility_snapshot": loads(session["prompt_eligibility_snapshot"], {}), "draft": loads(session["draft_payload_snapshot"], {}), "exposure_events": [{key: value for key, value in event.items() if key != "content"} for event in events], "assistance_state": "assisted" if events else "none_observed"}
 
     def session_action(self, session_id, action, payload=None):
         payload = as_dict(payload)
@@ -1362,16 +1780,19 @@ class Store:
             if action == "submit":
                 if session["status"] == "submitted":
                     self.commit()
-                    return {"review_session_id": session_id, "status": "submitted", "attempt_id": session["submitted_attempt_id"]}
+                    next_task = self.one("SELECT * FROM ReviewTask WHERE question_id=? AND status='open' ORDER BY due_at, review_round, created_at LIMIT 1", (session["question_id"],))
+                    return {"review_session_id": session_id, "status": "submitted", "attempt_id": session["submitted_attempt_id"], "next_task": self._task_summary(next_task)}
                 draft = self._draft(payload.get("draft", loads(session["draft_payload_snapshot"], {})))
                 events = as_list(loads(session["exposure_event_snapshots"], []))
                 attempt_id = uid("attempt")
+                submitted_at = self.clock()
                 response = {**draft, "assistance_state": "assisted" if events else "none_observed", "submit_event_ordinal": len(events) + 1}
-                self.conn.execute("INSERT INTO Attempt(attempt_id,question_id,question_revision_id,review_session_id,origin_kind,submission_state,submitted_at,completion_claim,initial_debt_claim,initial_debt_claim_basis,initial_debt_claim_captured_at,response_snapshot,assistance_state,external_help_reported,submit_event_ordinal,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (attempt_id, session["question_id"], session["question_revision_id"], session_id, "review", "submitted", self.clock(), draft["completion_claim"], None, None, None, dumps(response), response["assistance_state"], int(draft["external_help_reported"]), response["submit_event_ordinal"], self.clock()))
-                self.conn.execute("UPDATE ReviewSession SET status='submitted',submitted_attempt_id=?,ended_at=?,updated_at=?,draft_payload_snapshot=? WHERE review_session_id=?", (attempt_id, self.clock(), self.clock(), dumps(draft), session_id))
+                self.conn.execute("INSERT INTO Attempt(attempt_id,question_id,question_revision_id,review_session_id,origin_kind,submission_state,submitted_at,completion_claim,initial_debt_claim,initial_debt_claim_basis,initial_debt_claim_captured_at,response_snapshot,assistance_state,external_help_reported,submit_event_ordinal,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (attempt_id, session["question_id"], session["question_revision_id"], session_id, "review", "submitted", submitted_at, draft["completion_claim"], None, None, None, dumps(response), response["assistance_state"], int(draft["external_help_reported"]), response["submit_event_ordinal"], submitted_at))
+                self.conn.execute("UPDATE ReviewSession SET status='submitted',submitted_attempt_id=?,ended_at=?,updated_at=?,draft_payload_snapshot=? WHERE review_session_id=?", (attempt_id, submitted_at, submitted_at, dumps(draft), session_id))
                 self.conn.execute("UPDATE ReviewTask SET status='completed',completed_by_attempt_id=? WHERE review_task_id=?", (attempt_id, session["review_task_id"]))
+                next_task = self._schedule_after_review_submit(session, attempt_id, submitted_at)
                 self.commit()
-                return {"review_session_id": session_id, "status": "submitted", "attempt_id": attempt_id}
+                return {"review_session_id": session_id, "status": "submitted", "attempt_id": attempt_id, "next_task": self._task_summary(next_task)}
             raise DomainError("invalid_action", "unknown session action", {"action": action})
         except Exception:
             self.rollback()
@@ -1492,13 +1913,29 @@ class Store:
 
     # ---------- reads ----------
 
-    def get_due_review(self):
+    def get_due_reviews(self):
         rows = self.all("SELECT * FROM ReviewItemProjection WHERE status='open' AND due_at<=?", (self.clock(),))
-        if not rows:
-            return None
-        result = dict(sorted(rows, key=lambda row: (TASK_PRIORITY.index(row["reason_kind"]) if row["reason_kind"] in TASK_PRIORITY else 99, row["due_at"], row["review_round"], row["created_at"] or ""))[0])
-        result["state"] = "due"
+        rows = sorted(rows, key=lambda row: (TASK_PRIORITY.index(row["reason_kind"]) if row["reason_kind"] in TASK_PRIORITY else 99, row["due_at"], row["review_round"], row["created_at"] or ""))
+        result = []
+        for row in rows:
+            question = self.one("SELECT * FROM Question WHERE question_id=?", (row["question_id"],))
+            revision = self.one("SELECT * FROM QuestionRevision WHERE question_revision_id=?", (row["question_revision_id"],)) if question else None
+            prompt = self.one("SELECT * FROM ReviewPromptRevision WHERE review_prompt_revision_id=?", (row["review_prompt_revision_id"],)) if row["review_prompt_revision_id"] else None
+            presentation = loads(prompt["presentation_snapshot"], {}) if prompt else {}
+            refs = presentation.get("asset_refs") if isinstance(presentation, dict) else []
+            question_assets, question_image_status = self._question_assets_from_refs(refs)
+            grading = as_dict(loads(revision["grading_reference_fixture_snapshot"], {})) if revision else {}
+            result.append({"review_task_id":row["review_task_id"],"question_id":row["question_id"],"question_text":as_text(presentation.get("content")) if isinstance(presentation, dict) else "","question_assets":question_assets,"question_image_status":question_image_status,"is_image_intake":bool(grading.get("intake_id")),"review_round":row["review_round"],"reason_kind":row["reason_kind"],"due_at":row["due_at"],"status":row["status"],"state":"due"})
+        # Keep a real image intake ahead of an optional demo/legacy task when
+        # the singular UI asks for the next item, while still returning every
+        # due row to callers of the plural endpoint.
+        result.sort(key=lambda item: (0 if item["is_image_intake"] else 1, item["due_at"], item["review_round"], item["question_id"]))
         return result
+
+    def get_due_review(self):
+        """Legacy singular DTO retained for /api/due-review callers."""
+        rows = self.get_due_reviews()
+        return rows[0] if rows else None
 
     def projections(self):
         now = self.clock()
@@ -1507,6 +1944,9 @@ class Store:
             item = dict(row)
             if item["status"] == "open" and parse_time(item["due_at"]) <= parse_time(now):
                 item["state"] = "due"
+            prompt = self.one("SELECT presentation_snapshot FROM ReviewPromptRevision WHERE review_prompt_revision_id=?", (item.get("review_prompt_revision_id"),)) if item.get("review_prompt_revision_id") else None
+            presentation = loads(prompt["presentation_snapshot"], {}) if prompt else {}
+            item["question_text"] = as_text(presentation.get("content")) if isinstance(presentation, dict) else ""
             items.append(item)
         objectives = []
         for row in self.all("SELECT * FROM LearnerObjectiveProjection"):
@@ -1614,6 +2054,8 @@ class Handler(BaseHTTPRequestHandler):
             path = urlparse(self.path).path
             if path == "/api/due-review":
                 return self._json(200, {"data": self.store.get_due_review()})
+            if path == "/api/reviews/due":
+                return self._json(200, {"data": self.store.get_due_reviews()})
             if path == "/api/projections":
                 return self._json(200, {"data": self.store.projections()})
             if path == "/api/north-star":
@@ -1622,6 +2064,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, {"data": self.store.list_intakes()})
             if path == "/api/wrong-questions":
                 return self._json(200, {"data": self.store.list_wrong_questions()})
+            if path.startswith("/api/attempts/"):
+                return self._json(200, {"data": self.store.get_attempt(path.rsplit("/", 1)[1])})
             if path.startswith("/api/wrong-questions/"):
                 return self._json(200, {"data": self.store.get_wrong_question(path.rsplit("/", 1)[1])})
             if path.startswith("/api/intake/"):
@@ -1678,12 +2122,21 @@ class Handler(BaseHTTPRequestHandler):
                 values, files = payload
                 if path == "/api/intake/batches":
                     return self._json(200, {"data": self.store.create_intake_batch(files, values.get("subject_key") or None)})
+                if path.startswith("/api/wrong-questions/") and path.endswith("/redo"):
+                    question_id = path[len("/api/wrong-questions/"):-len("/redo")].strip("/")
+                    return self._json(200, {"data": self.store.redo_upload(question_id, files, values)})
                 if path.startswith("/api/intake/") and path.endswith("/assets"):
                     intake_id = path[len("/api/intake/"):-len("/assets")].strip("/")
                     return self._json(200, {"data": self.store.append_intake_assets(intake_id, files)})
                 payload = values
             if path == "/api/intake/batches":
                 return self._json(200, {"data": self.store.create_intake_batch([], payload.get("subject_key"))})
+            if path.startswith("/api/wrong-questions/") and path.endswith("/redo"):
+                question_id = path[len("/api/wrong-questions/"):-len("/redo")].strip("/")
+                return self._json(200, {"data": self.store.redo_upload(question_id, [], payload)})
+            if path.startswith("/api/attempts/") and path.endswith("/submit"):
+                attempt_id = path[len("/api/attempts/"):-len("/submit")].strip("/")
+                return self._json(200, {"data": self.store.submit_attempt(attempt_id, payload)})
             if path.startswith("/api/intake/") and path.endswith("/analyze"):
                 intake_id = path[len("/api/intake/"):-len("/analyze")].strip("/")
                 return self._json(200, {"data": self.store.analyze_intake(intake_id)})
@@ -1722,6 +2175,11 @@ class Handler(BaseHTTPRequestHandler):
     def do_PATCH(self):
         try:
             path = urlparse(self.path).path
+            if path.startswith("/api/attempts/"):
+                length = int(self.headers.get("Content-Length", 0))
+                payload = loads(self.rfile.read(length) or b"{}", {})
+                attempt_id = path[len("/api/attempts/"):].strip("/")
+                return self._json(200, {"data": self.store.patch_attempt_draft(attempt_id, payload)})
             if path.startswith("/api/intake/"):
                 length = int(self.headers.get("Content-Length", 0))
                 payload = loads(self.rfile.read(length) or b"{}", {})
