@@ -576,6 +576,11 @@ class Store:
             confirmed_asset_ids = self._confirmed_asset_ids(draft)
             if isinstance(payload.get("draft_fields"), dict):
                 draft.update(payload["draft_fields"])
+                if confirmed and "subject_key" in payload["draft_fields"]:
+                    subject_value = payload["draft_fields"].get("subject_key") or None
+                    if subject_value not in SUBJECT_KEYS:
+                        subject_value = None
+                    self.conn.execute("UPDATE CaptureBatch SET subject_key=? WHERE batch_id=?", (subject_value, batch_id))
             if "subject_key" in payload:
                 # Keep the top-level subject edit and the intake draft in
                 # sync so confirmed grading receives the same value.
