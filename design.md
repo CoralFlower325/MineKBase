@@ -310,9 +310,13 @@ GET   /api/reviews/due                   # 到期题面和日期
 
 已接通真实题面/本人过程/参考答案资产快照、到期只显示题面、`redo_process` 多图草稿、独立 Attempt 提交、提交后比较/可编辑诊断和下一日期；模型比较失败只记录失败草稿，不回滚 Attempt。ReviewTask 按确认锚点固定 +3/+7/+10/+14 顺序生成，第 14 天后停止。
 
-### E. macOS 提醒与资料扩展
+### E1. macOS 提醒（已完成）
 
-加入每日 launchd 通知，再按真实资料样本接入 Word/网页/扫描 PDF 解析。先解决实际遇到的格式，不预装所有解析器。
+已加入每日一次的 LaunchAgent 检查：只读 SQLite 中已到期的 open ReviewTask，将数量、最早到期日期和 WebUI 提示合并成一条不含题面隐私的 macOS 通知；无到期任务时静默，不写数据库、不调用模型。
+
+### E2. 资料扩展（后置）
+
+下一种优先接入的真实资料格式建议为 Word DOCX：沿现有 SourceArtifact → SourcePassage → FTS 链路保存原文件并保留段落/表格 locator，再按真实样本决定是否引入单一轻量解析依赖。网页、扫描 PDF/OCR 继续后置，不预装多个解析器。
 
 ### F. 真实数据后再评估
 
@@ -356,13 +360,14 @@ GET   /api/reviews/due                   # 到期题面和日期
 - 一题分析草稿：多图视觉请求、`openai_chat`/`openai_responses`/`anthropic_messages` 适配与回退、可编辑候选字段、原始回答保留和失败重试；
 - C 主链：轻量 FTS/已确认题目候选、确认晋级、QuestionSourceLink 出处回链、题面/过程图片快照隔离、正式错题列表/详情和首个 +3 天任务；
 - C 的角色收口已完成：未指定角色也可确认并显示“待补题面”，确认后可在错题详情补选题面、过程、参考答案和顺序；演示/兼容数据有明确标识；
+- 错题本轻量筛选：正式错题列表支持按 subject_key、chapter、knowledge_point、question_type 精确筛选；无筛选时分类为空的题目仍显示；
 - D 主链：真实题面显示、回测过程图草稿与提交、初次/本次过程比较、可编辑诊断和固定 +3/+7/+10/+14 后续任务；比较失败不阻塞 Attempt 保存。
+- E1 macOS 提醒：只读 SQLite 的 open/due ReviewTask，合并为单条 LaunchAgent 通知；安装与卸载脚本不改学习数据。
 - start.command 启动本地服务并打开浏览器。
 
 ### 当前代码还没有（不能假装已完成）
 
 - FTS 仍不是语义相似题召回，科目过滤/数学↔专业课轻跨科仍是可后置增强；
-- macOS launchd 通知；
 - Word/网页/扫描 PDF 等资料扩展，以及真实需要出现前的 LightRAG/向量旁路。
 
 ### 最终验收场景
