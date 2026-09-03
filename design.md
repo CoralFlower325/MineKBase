@@ -49,7 +49,7 @@ knowledge_point   可空、可编辑
 question_type     可空、可编辑
 ~~~
 
-这些字段是帮助检索和整理的候选，不是入库条件；在答案和错误诊断已确认的前提下，分类不完整时题目仍可以进入错题本。
+这些字段是帮助检索和整理的候选，不是入库条件；确认不要求答案或错误诊断字段完整，缺少内容显示“待补充”，确认后仍可继续编辑和补充，分类不完整时题目同样可以进入错题本。
 
 ### 1.2 输入
 
@@ -129,7 +129,7 @@ analyze(image_assets, retrieved_context)
 | ImageAsset | asset_id、batch_id、role、ordinal、path、mime | 原图文件；role 为题面/本人过程/标准答案/mixed/重做过程 |
 | IntakeItem | intake_id、batch_id、state、draft_fields、failure_note | 未完整处理数据集中的一题；`state` 表示原图保存完整性，分析状态放在 `draft_fields.analysis_status` |
 | AnalysisCandidate | 题面、参考答案、四个分类字段、错误原因、首次断点、正确思路、来源 | 模型/RAG 产生的候选；来源可指向 asset/区域或 passage locator，所有字段可空、可编辑 |
-| WrongQuestion | wrong_question_id、已确认字段、原始资产引用 | 用户确认后的错题本卡片；参考答案、错误原因和首次断点须已确认，正确思路可空，分类字段可以为空 |
+| WrongQuestion | wrong_question_id、已确认字段、原始资产引用 | 用户确认后的错题本卡片；参考答案、错误原因和首次断点按用户当前内容保存，可为空并显示“待补充”，确认后仍可补充，分类字段可以为空 |
 | Attempt | attempt_id、wrong_question_id、kind、response_text?、asset_ids、submitted_at | 初次作答或回测重做；永不覆盖历史 |
 | MaterialArtifact | artifact_id、kind、subject_key?、path/url、parse_state | 教材、讲义、笔记、网页等原始资料 |
 | Passage | passage_id、artifact_id、text、page/locator、subject_key、chapter?、knowledge_point?、question_type? | 资料的可回源派生片段，进入 FTS/向量索引；分类元数据可空 |
@@ -141,7 +141,7 @@ analyze(image_assets, retrieved_context)
 
 - question_text、reference_answer、error_reason、error_breakpoint、correct_approach 都是可编辑文本；没有识别结果就留空。
 - 模型输出保存为候选和来源说明；不要求模型返回 JSON，也不因格式不完整而拒绝保存。服务端把能识别的部分填入普通字段，原始回答可作为普通文本留存。
-- reference_answer、error_reason 和 error_breakpoint 必须由用户确认后才能晋级为正式错题卡；correct_approach 可空，但若保留模型给出的内容，也必须在同一次确认中接受或修改。subject/chapter/knowledge_point/question_type 可以为空。用户不认可模型答案或诊断时，原图和候选继续留在 intake 中，不创建正式 ReviewTask。
+- reference_answer、error_reason 和 error_breakpoint 写入正式错题卡时以用户当前确认的内容为准；字段可以为空，空值显示“待补充”，确认后仍可在错题详情继续编辑和补充。未经用户确认的模型答案或诊断只停留在 intake 草稿，不设置技术门禁，也不阻止用户先确认题目。
 - 模型失败、RAG 零命中、识别乱码或网络不可用，都只把 IntakeItem 留在未完整处理数据集并显示原因；已上传的图片不回滚，也不生成未经确认的错题卡。
 - 数据库中的快照若用于保存历史事实可以保留；不再维护外部 schema/policy JSON、版本门禁或未知字段拒绝器。
 
@@ -185,7 +185,7 @@ flowchart TD
 - error_breakpoint：本人过程第一次与正确路线分叉的步骤/图片区域；
 - correct_approach：从断点继续的最短正确思路。
 
-模型只提出初稿，用户可以直接修改。参考答案或诊断没有得到用户确认时，继续留在 intake，不生成正式错题卡；分类字段仍不要求完整。
+模型只提出初稿，用户可以直接修改。参考答案或诊断未填写时仍可确认进入错题本，正式卡片显示“待补充”，用户之后可以继续补齐；未经用户确认的模型内容不写入正式 grading，分类字段仍不要求完整。
 
 ## 6. 共享 RAG 设计
 
@@ -284,7 +284,7 @@ POST  /api/attempts/:id/submit            # 封存重做、可选比较并生成
 GET   /api/reviews/due                   # 到期题面和日期
 ~~~
 
-上传使用浏览器 multipart 文件，不把图片膨胀成 base64 JSON。capture/intake 缺字段照常保存；confirm 是用户业务动作，分类字段可空，诊断未齐也应保留在可继续编辑的 intake 中，不用技术门禁阻断上传或重试。模型协议适配器是服务端内部模块，不另造一套业务 API。
+上传使用浏览器 multipart 文件，不把图片膨胀成 base64 JSON。capture/intake 缺字段照常保存；confirm 是用户业务动作，不要求答案、错误原因或断点完整，空字段以“待补充”保留，确认后可继续编辑和补充；不设置技术门禁阻断上传、重试或确认。模型协议适配器是服务端内部模块，不另造一套业务 API。
 
 ## 11. 直接开发路线
 

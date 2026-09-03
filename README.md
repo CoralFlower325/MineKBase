@@ -16,6 +16,7 @@
 - 可用 `/api/answer` 基于题面、已关联出处和 FTS 命中生成普通文本回答；回答会保存到本地 SQLite，并由服务端返回真实 passage 出处。
 - 图片 intake 已支持多图视觉分析草稿、三种模型协议、回退、字段编辑和失败重试；分析失败时原图仍保留，不会自动生成正式错题。
 - 图片 intake 已支持基于现有 FTS/已确认题目的轻量候选召回；确认会保留题面、本人过程、参考答案原图并创建正式 Question/Attempt/ReviewTask；确认后仍可在错题详情补选题面、过程、参考答案角色并调整顺序，只同步当前 Question 展示引用和 grading 资产引用，不改历史 Attempt。历史 Attempt 按其快照中的 asset_id 展示，不受之后角色或顺序调整影响。没有 question/mixed 角色时也可确认，但正式题面明确显示“待补题面”；补选后可刷新看到更新。普通 intake 上传不会创建 `redo_process`，回测过程只能由 redo 上传路径创建；旧数据中的回测角色仍可在错题详情改回普通角色。专用 redo 上传会将新图保存为 `redo_process`，写入回测草稿并在提交后保留其 asset_id。到期回测只显示题面，可上传一张或多张 `redo_process` 图片，提交后显示比较/诊断，比较失败不阻塞保存。
+- 确认不要求答案、错误原因或解题断点完整；缺少内容以“待补充”显示，确认后仍可在正式错题详情继续编辑和补充，不设置技术门禁。
 - 正式错题本支持按科目、章节、知识点和题型做轻量精确筛选；不带筛选条件时仍显示分类为空的题目。
 - `notify_due.py` 和配套 LaunchAgent 脚本已提供每日一次、隐私友好的到期任务合并提醒；通知进程只读 SQLite，不写任务或调用模型。
 - 资料与回答接入保持四件薄对象：`SourceArtifact`、`SourcePassage`、`QuestionSourceLink`、`Answer`；回答状态 `grounded/unlocated/unavailable` 是结果状态，不是流程门禁。
@@ -36,6 +37,26 @@ python3 app.py --db /tmp/knowledge-demo.sqlite seed --force --as-of 2026-09-01T0
 ```
 
 浏览器打开 <http://127.0.0.1:8765/>。
+
+### macOS 到期提醒（E1）
+
+安装脚本会为当前用户生成并加载每日 09:00 执行的 LaunchAgent，读取本项目的 `library.sqlite`，将到期回测合并为一条不含题面隐私的通知：
+
+```bash
+./install_notifications.command
+```
+
+卸载时运行：
+
+```bash
+./uninstall_notifications.command
+```
+
+脚本只操作 `~/Library/LaunchAgents/com.kaoyan.wrongbook.due.plist` 和 launchd，不修改学习数据。需要临时检查通知查询时，可直接指定数据库和当前时间（不会写库）：
+
+```bash
+python3 notify_due.py --db /path/to/library.sqlite --now 2026-09-03T00:00:00Z
+```
 
 ## 真实收录
 
@@ -90,7 +111,7 @@ python3 run_p0_scenarios.py
 4. PDF 文本层解析已完成：使用现有 `pypdf` 按页提取，写入同一套 `SourcePassage`、FTS 和 locator；扫描 PDF/OCR 尚未接入，首页状态展示留作薄 UX 收尾。
 5. Context Composer + LLM 薄切片已完成：先使用已关联 passage，再合并现有 FTS 命中，返回服务端实际出处；未定位或 LLM 不可用都不阻断保存。
 6. 只有真实需要跨章节、多跳关系时才接入一个 [LightRAG](https://github.com/HKUDS/LightRAG) REST sidecar；不同时运行两套图/向量索引。若需要更强布局解析，再单独评估 [Docling](https://github.com/docling-project/docling)。
-7. 图片错题按确认时间依次安排 +3/+7/+10/+14 天，第 14 天后停止自动排程；旧文字演示链仅用于迁移，不作为新的间隔规则基线。macOS 通知和 FSRS 后置。
+7. 图片错题按确认时间依次安排 +3/+7/+10/+14 天，第 14 天后停止自动排程；旧文字演示链仅用于迁移，不作为新的间隔规则基线。macOS 通知已实现，FSRS 后置。
 
 原则只有一句：用户输入先落库，增强过程后补；状态和提示帮助用户判断，不把不完整变成阻碍。
 
