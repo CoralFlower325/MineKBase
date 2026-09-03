@@ -1247,10 +1247,21 @@ class Store:
         # Force every uploaded file to the redo role. The ordinary intake
         # uploader still owns persistence and per-file failure handling.
         redo_files = [{**as_dict(item), "role": "redo_process"} for item in (files or [])]
+        existing_asset_rows = self.all(
+            "SELECT asset_id FROM ImageAsset WHERE batch_id=(SELECT batch_id FROM IntakeItem WHERE intake_id=?)",
+            (intake_id,),
+        )
+        existing_asset_ids = {row["asset_id"] for row in existing_asset_rows}
         before_ids = as_list(existing_draft.get("response_assets"))
         if redo_files:
             detail = self.append_intake_assets(intake_id, redo_files, allow_redo=True)
-            saved_new = [a["asset_id"] for a in detail.get("assets", []) if a.get("role") == "redo_process" and a.get("state") == "saved" and a.get("path")]
+            saved_new = [
+                a["asset_id"] for a in detail.get("assets", [])
+                if a.get("asset_id") not in existing_asset_ids
+                and a.get("role") == "redo_process"
+                and a.get("state") == "saved"
+                and a.get("path")
+            ]
         else:
             saved_new = []
         response_assets = []
