@@ -1395,7 +1395,7 @@ class Store:
                 key = item.get("source_passage_id")
                 if key in seen: continue
                 seen.add(key)
-                candidates.append({"kind":"source", "source_passage_id":key, "source_artifact_id":item.get("source_artifact_id"), "source_name":item.get("source_name"), "text":item.get("text"), "page_no":item.get("page_no"), "locator":item.get("locator") or item.get("locator_json")})
+                candidates.append({"kind":"source", "source_passage_id":key, "source_artifact_id":item.get("source_artifact_id"), "source_name":item.get("source_name"), "subject_key":item.get("subject_key"), "text":item.get("text"), "page_no":item.get("page_no"), "locator":item.get("locator") or item.get("locator_json")})
             import re
             fragments = re.findall(r"[A-Za-z0-9_]+|[\u4e00-\u9fff]{2,}", query)
             fragments = list(dict.fromkeys(fragments))[:8] or [query[:30]]
