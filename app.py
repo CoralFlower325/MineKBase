@@ -799,6 +799,10 @@ class Store:
                     (artifact_id,),
                 )
             }
+            linked_ids = {row["source_passage_id"] for row in self.all("SELECT source_passage_id FROM QuestionSourceLink WHERE source_passage_id IN (SELECT source_passage_id FROM SourcePassage WHERE source_artifact_id=?)", (artifact_id,))}
+            for ordinal, old in existing.items():
+                if ordinal > len(passages) and old["source_passage_id"] not in linked_ids:
+                    self.conn.execute("DELETE FROM SourcePassage WHERE source_passage_id=?", (old["source_passage_id"],))
             passage_ids = []
             for ordinal, entry in enumerate(passages, 1):
                 piece, page_no = entry[0], entry[1]
@@ -810,6 +814,11 @@ class Store:
                 locator = {"ordinal": ordinal, **as_dict(parser_locator)}
                 if page_no is not None:
                     locator["page_no"] = page_no
+                if current and current["source_passage_id"] in linked_ids:
+                    # Historical linked evidence is immutable; keep its text
+                    # and locator even when a later parse produces different
+                    # content at the same ordinal.
+                    continue
                 if current:
                     self.conn.execute(
                         "UPDATE SourcePassage SET text=?,page_no=?,bbox=?,locator_json=? WHERE source_passage_id=?",
@@ -889,6 +898,12 @@ class Store:
             else:
                 chunks.append(term)
         chunks = list(dict.fromkeys(chunks))[:24]
+        subject_clause = ""
+        subject_args = []
+        if primary_subject:
+            allowed_subjects = [primary_subject] + related
+            subject_clause = " AND (a.subject_key IS NULL OR a.subject_key IN (" + ",".join("?" for _ in allowed_subjects) + "))"
+            subject_args.extend(allowed_subjects)
         rows = []
         if chunks:
             match = " OR ".join('"' + token.replace('"', '""') + '"' for token in chunks)
@@ -896,8 +911,8 @@ class Store:
                 rows = self.all(
                     "SELECT p.source_passage_id,p.source_artifact_id,p.text,p.page_no,p.bbox,p.locator_json,a.source_name,a.subject_key,bm25(SourcePassageFTS) AS score "
                     "FROM SourcePassage p JOIN SourcePassageFTS f ON f.source_passage_id=p.source_passage_id "
-                    "JOIN SourceArtifact a ON a.source_artifact_id=p.source_artifact_id WHERE SourcePassageFTS MATCH ? ORDER BY score LIMIT ?",
-                    (match, max(limit * 6, 24)),
+                    "JOIN SourceArtifact a ON a.source_artifact_id=p.source_artifact_id WHERE SourcePassageFTS MATCH ?" + subject_clause + " ORDER BY score LIMIT ?",
+                    (match, *subject_args, max(limit * 6, 24)),
                 )
             except sqlite3.OperationalError:
                 rows = []
@@ -912,8 +927,8 @@ class Store:
             clauses = " OR ".join("COALESCE(p.text,'') LIKE ?" for _ in like_terms) or "COALESCE(p.text,'') LIKE ?"
             rows = self.all(
                 "SELECT p.source_passage_id,p.source_artifact_id,p.text,p.page_no,p.bbox,p.locator_json,a.source_name,a.subject_key,NULL AS score "
-                f"FROM SourcePassage p JOIN SourceArtifact a ON a.source_artifact_id=p.source_artifact_id WHERE {clauses} ORDER BY p.source_artifact_id,p.ordinal",
-                tuple(f"%{term}%" for term in (like_terms or [query])),
+                f"FROM SourcePassage p JOIN SourceArtifact a ON a.source_artifact_id=p.source_artifact_id WHERE ({clauses})" + subject_clause + " ORDER BY p.source_artifact_id,p.ordinal",
+                tuple(f"%{term}%" for term in (like_terms or [query])) + tuple(subject_args),
             )
         allowed = {primary_subject, None, *related} if primary_subject else None
         result, seen = [], set()
@@ -1167,11 +1182,13 @@ class Store:
                 for key, value in fields.items():
                     if value not in (None, "") and not draft.get(key):
                         draft[key] = value
-                draft.update({"raw_analysis": second_raw, "analysis_status": "draft", "analysis_error": "", "grounding_label": "有资料依据"})
+                draft.update({"raw_analysis": second_raw, "analysis_status": "draft", "analysis_error": "", "grounding_error": "", "grounding_label": "有资料依据"})
             except Exception as error:
                 draft.update({"analysis_status": "failed", "analysis_error": f"资料复核解析失败：{error}"})
         elif retrieved and second_errors:
-            draft.update({"analysis_status": "failed", "analysis_error": "；".join(second_errors)[:500], "grounding_label": "模型不可用"})
+            # The first image-only draft remains editable; grounding failure is
+            # a separate enrichment status and never replaces that draft.
+            draft.update({"grounding_error": "；".join(second_errors)[:500], "grounding_label": "资料复核失败"})
         self.begin()
         try:
             self.conn.execute("UPDATE IntakeItem SET draft_fields=?,updated_at=? WHERE intake_id=?", (dumps(draft), self.clock(), intake_id)); self.commit()
@@ -1206,9 +1223,13 @@ class Store:
                 key = item.get("source_passage_id")
                 if key in seen: continue
                 seen.add(key)
-                candidates.append({"kind":"source", "source_passage_id":key, "source_artifact_id":item.get("source_artifact_id"), "text":item.get("text"), "page_no":item.get("page_no"), "locator":item.get("locator_json")})
-            like = "%" + (terms[0] if terms else query[:30]) + "%"
-            qrows = self.all("SELECT q.question_id,qr.question_revision_id,qr.question_units,qr.grading_reference_fixture_snapshot FROM Question q JOIN QuestionRevision qr ON qr.question_revision_id=q.current_question_revision_id WHERE qr.revision_state='confirmed' AND (qr.question_units LIKE ? OR qr.grading_reference_fixture_snapshot LIKE ?) ORDER BY q.created_at DESC LIMIT 8", (like, like))
+                candidates.append({"kind":"source", "source_passage_id":key, "source_artifact_id":item.get("source_artifact_id"), "source_name":item.get("source_name"), "text":item.get("text"), "page_no":item.get("page_no"), "locator":item.get("locator") or item.get("locator_json")})
+            import re
+            fragments = re.findall(r"[A-Za-z0-9_]+|[\u4e00-\u9fff]{2,}", query)
+            fragments = list(dict.fromkeys(fragments))[:8] or [query[:30]]
+            like_clauses = " OR ".join("qr.question_units LIKE ? OR qr.grading_reference_fixture_snapshot LIKE ?" for _ in fragments)
+            like_args = tuple(arg for fragment in fragments for arg in (f"%{fragment}%", f"%{fragment}%"))
+            qrows = self.all("SELECT q.question_id,qr.question_revision_id,qr.question_units,qr.grading_reference_fixture_snapshot FROM Question q JOIN QuestionRevision qr ON qr.question_revision_id=q.current_question_revision_id WHERE qr.revision_state='confirmed' AND (" + like_clauses + ") ORDER BY q.created_at DESC LIMIT 8", like_args)
             for item in qrows:
                 key = item["question_id"]
                 if key in seen: continue
