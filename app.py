@@ -576,6 +576,10 @@ class Store:
             confirmed_asset_ids = self._confirmed_asset_ids(draft)
             if isinstance(payload.get("draft_fields"), dict):
                 draft.update(payload["draft_fields"])
+            if "subject_key" in payload:
+                # Keep the top-level subject edit and the intake draft in
+                # sync so confirmed grading receives the same value.
+                draft["subject_key"] = payload.get("subject_key") or None
             changed_assets = payload.get("assets") if isinstance(payload.get("assets"), list) else []
             # Apply deletions first, then use temporary negative ordinals so a
             # swap (1↔2) never trips the UNIQUE(batch_id, ordinal) constraint.
@@ -633,12 +637,39 @@ class Store:
             incomplete_count = self.one("SELECT COUNT(*) FROM ImageAsset WHERE batch_id=? AND state='incomplete'", (batch_id,))[0]
             next_state = "saved" if saved_count and not incomplete_count else "incomplete"
             self.conn.execute("UPDATE IntakeItem SET state=?,draft_fields=?,updated_at=? WHERE intake_id=?", (next_state, dumps(draft), self.clock(), intake_id))
+            if confirmed:
+                self._sync_confirmed_draft_fields(draft)
             self._sync_confirmed_asset_snapshots(draft, batch_id)
             self.commit()
             return self._intake_detail(intake_id)
         except Exception:
             self.rollback()
             raise
+
+    def _sync_confirmed_draft_fields(self, draft):
+        """Apply editable intake fields to the current confirmed revision.
+
+        The intake remains the editing surface, while the current grading
+        snapshot is updated in place for an already-confirmed question. Older
+        revisions and Attempt snapshots are historical records and are never
+        touched here. Empty values are intentionally written as empty so a
+        user can clear a previous value without making the field mandatory.
+        """
+        question_id = as_dict(draft).get("confirmed_question_id")
+        if not question_id:
+            return
+        question = self.one("SELECT current_question_revision_id FROM Question WHERE question_id=?", (question_id,))
+        revision = self.one("SELECT question_revision_id,grading_reference_fixture_snapshot FROM QuestionRevision WHERE question_revision_id=? AND question_id=?", (question["current_question_revision_id"], question_id)) if question and question["current_question_revision_id"] else None
+        if not revision:
+            return
+        grading = as_dict(loads(revision["grading_reference_fixture_snapshot"], {}))
+        for key in ("reference_answer", "error_reason", "error_breakpoint", "correct_approach", "chapter", "knowledge_point", "question_type"):
+            if key in draft:
+                grading[key] = as_text(draft.get(key))
+        if "subject_key" in draft:
+            value = draft.get("subject_key")
+            grading["subject_key"] = value if isinstance(value, str) and value in SUBJECT_KEYS else None
+        self.conn.execute("UPDATE QuestionRevision SET grading_reference_fixture_snapshot=? WHERE question_revision_id=?", (dumps(grading), revision["question_revision_id"]))
 
     def media_asset(self, asset_id):
         row = self.one("SELECT * FROM ImageAsset WHERE asset_id=?", (asset_id,))
@@ -959,9 +990,14 @@ class Store:
     def analyze_intake(self, intake_id):
         row = self.one("SELECT i.*,b.subject_key FROM IntakeItem i JOIN CaptureBatch b ON b.batch_id=i.batch_id WHERE i.intake_id=?", (intake_id,))
         if not row: raise DomainError("not_found", "intake not found", {"intake_id": intake_id})
-        assets = self.all("SELECT * FROM ImageAsset WHERE batch_id=? AND state='saved' ORDER BY ordinal,created_at,asset_id", (row["batch_id"],))
-        if not assets: raise DomainError("no_assets", "intake has no saved images", {"intake_id": intake_id})
         draft = loads(row["draft_fields"], {})
+        confirmed = bool(as_dict(draft).get("confirmed_question_id"))
+        asset_query = "SELECT * FROM ImageAsset WHERE batch_id=? AND state='saved'"
+        if confirmed:
+            asset_query += " AND (role IS NULL OR role!='redo_process')"
+        asset_query += " ORDER BY ordinal,created_at,asset_id"
+        assets = self.all(asset_query, (row["batch_id"],))
+        if not assets: raise DomainError("no_assets", "intake has no saved images", {"intake_id": intake_id})
         draft.update({"analysis_status": "analyzing", "analysis_error": ""})
         self.begin(); self.conn.execute("UPDATE IntakeItem SET draft_fields=?,updated_at=? WHERE intake_id=?", (dumps(draft), self.clock(), intake_id)); self.commit()
         prompt_lines = ["你是错题分析助手。请阅读按顺序提供的图片，输出普通文本或 Markdown，并尽量使用以下标题：题面、标准答案、科目、章节、知识点、题型、做错原因、解题断点、正确思路。", "区分题目要求、我的解题步骤、标准答案/模型答案；指出我具体在哪一步开始偏离，错误属于概念、条件理解、公式使用、计算、推理、表达或其他原因。", "不确定的内容标记为‘待确认’，不要猜测填满字段；分类字段可以为空。"]
