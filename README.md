@@ -109,7 +109,7 @@ python3 run_p0_scenarios.py
 1. 已完成真实收录：题目文字、本人作答、资料文本或路径会写入 SQLite，缺字段也保存。
 2. FTS5 已完成：使用 `trigram` 支持中文片段，短词用 `LIKE` 补足；`/api/search?q=...` 返回 passage 和出处定位，零命中仍返回空结果，重复 `enrich` 保留 passage_id。
 3. 出处回链已完成：搜索命中可关联到题目，题目详情返回 passage 和 locator，不做自动对齐或评分。
-4. PDF 文本层解析已完成：使用现有 `pypdf` 按页提取，写入同一套 `SourcePassage`、FTS 和 locator；扫描 PDF/OCR 尚未接入，首页状态展示留作薄 UX 收尾。
+4. PDF 文本层解析已完成：使用现有 `pypdf` 按页提取，写入同一套 `SourcePassage`、FTS 和 locator；扫描 PDF/资料图片使用可选、懒加载的 PaddleOCR，依赖缺失时返回 `unavailable` 并保留原文件，不宣称默认 OCR 已完全覆盖复杂版面。
 5. Context Composer + LLM 薄切片已完成：先使用已关联 passage，再合并现有 FTS 命中，返回服务端实际出处；未定位或 LLM 不可用都不阻断保存。
 6. 只有真实需要跨章节、多跳关系时才接入一个 [LightRAG](https://github.com/HKUDS/LightRAG) REST sidecar；不同时运行两套图/向量索引。若需要更强布局解析，再单独评估 [Docling](https://github.com/docling-project/docling)。
 7. 图片错题按确认时间依次安排 +3/+7/+10/+14 天，第 14 天后停止自动排程；旧文字演示链仅用于迁移，不作为新的间隔规则基线。macOS 通知已实现，FSRS 后置。
