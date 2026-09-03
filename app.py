@@ -1188,13 +1188,26 @@ class Store:
                 redo_draft = {"attempt_id": draft_attempt_id, "review_session_id": active_session["review_session_id"], "review_task_id": active_session["review_task_id"], "response_text": as_text(raw_draft.get("response_text")), "response_assets": [a["asset_id"] for a in draft_assets], "assets": draft_assets}
         return {"question_id":question_id,"question":dict(question),"question_revision":dict(revision),"question_text":as_text((presentation.get("content") if isinstance(presentation,dict) else "")),"presentation":presentation,"assets":assets,"editable_assets":editable_assets,"intake_id":grading.get("intake_id"),"reference_assets":reference_assets,"question_image_status":question_image_status,"data_origin":data_origin,"display_label":as_text(grading.get("display_label")) or "真实题目","grading":grading,"sources":sources,"next_due_at":task["due_at"] if task else None,"review_task_id":task["review_task_id"] if task else None,"next_task":self._task_summary(task),"redo_draft":redo_draft,"latest_redo_attempt_id":latest_redo["attempt_id"] if latest_redo else None}
 
-    def list_wrong_questions(self):
+    def list_wrong_questions(self, filters=None):
+        """Return confirmed intake-backed questions, optionally filtered by tags.
+
+        Filtering deliberately stays a small exact-match projection over the
+        existing grading snapshot. Empty fields remain visible when no filter
+        is supplied, and a missing/empty field simply does not match a
+        non-empty filter value.
+        """
+        filters = {key: as_text(value).strip() for key, value in as_dict(filters).items()
+                   if key in {"subject_key", "chapter", "knowledge_point", "question_type"}
+                   and as_text(value).strip()}
         rows = self.all("SELECT q.question_id FROM Question q JOIN QuestionRevision qr ON qr.question_revision_id=q.current_question_revision_id WHERE qr.revision_state='confirmed' AND qr.grading_reference_fixture_snapshot LIKE '%intake_id%'")
         result = []
         for row in rows:
             item = self._wrong_dto(row["question_id"])
             if item:
-                result.append({"question_id":item["question_id"],"question_text":item["question_text"],"subject_key":item["grading"].get("subject_key"),"asset_count":len(item["assets"]),"reference_answer":item["grading"].get("reference_answer"),"error_reason":item["grading"].get("error_reason"),"next_due_at":item["next_due_at"],"data_origin":item.get("data_origin"),"display_label":item.get("display_label")})
+                grading = as_dict(item.get("grading"))
+                if any(as_text(grading.get(key)).strip() != value for key, value in filters.items()):
+                    continue
+                result.append({"question_id":item["question_id"],"question_text":item["question_text"],"subject_key":grading.get("subject_key"),"chapter":grading.get("chapter"),"knowledge_point":grading.get("knowledge_point"),"question_type":grading.get("question_type"),"asset_count":len(item["assets"]),"reference_answer":grading.get("reference_answer"),"error_reason":grading.get("error_reason"),"next_due_at":item["next_due_at"],"data_origin":item.get("data_origin"),"display_label":item.get("display_label")})
         return result
 
     def get_wrong_question(self, question_id):
@@ -2094,7 +2107,9 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/intake":
                 return self._json(200, {"data": self.store.list_intakes()})
             if path == "/api/wrong-questions":
-                return self._json(200, {"data": self.store.list_wrong_questions()})
+                query = parse_qs(urlparse(self.path).query, keep_blank_values=True)
+                filters = {key: values[0] for key, values in query.items() if values}
+                return self._json(200, {"data": self.store.list_wrong_questions(filters)})
             if path.startswith("/api/attempts/"):
                 return self._json(200, {"data": self.store.get_attempt(path.rsplit("/", 1)[1])})
             if path.startswith("/api/wrong-questions/"):
