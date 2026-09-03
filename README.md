@@ -14,6 +14,9 @@
 - 可把搜索到的资料 passage 手动关联到题目，并在题目详情中查看出处定位。
 - 可通过 `enrich` 按页提取文字 PDF、扫描/资料图片和 DOCX（段落、表格），并保留页码或 DOCX 定位；扫描页 OCR 是可选增强。
 - 可用 `/api/answer` 基于题面、已关联出处和 FTS 命中生成普通文本回答；回答会保存到本地 SQLite，并由服务端返回真实 passage 出处。
+- 首页“模型设置”可以保存 primary/fallback 的协议、地址、模型和 API key；没有保存配置时继续兼容现有 `LLM_*` / `LLM_FALLBACK_*` 环境变量。
+- 资料上传后会按文件顺序自动调用现有 `/api/enrich`，图片题保存后会自动顺序执行分析和轻量资料匹配；失败只保留可重试状态，不阻断后续编辑。
+- `retrieve()` 对数学和专业课提供轻量跨科补召回（主科优先、未分类其次、另一科最后）；英语和政治不自动跨科，当前仍是 FTS/LIKE，不是语义向量检索。
 - 图片 intake 已支持多图视觉分析草稿、三种模型协议、回退、字段编辑和失败重试；分析失败时原图仍保留，不会自动生成正式错题。
 - 图片 intake 已支持基于现有 FTS/已确认题目的轻量候选召回；确认会保留题面、本人过程、参考答案原图并创建正式 Question/Attempt/ReviewTask；确认后仍可在错题详情补选题面、过程、参考答案角色并调整顺序，只同步当前 Question 展示引用和 grading 资产引用，不改历史 Attempt。历史 Attempt 按其快照中的 asset_id 展示，不受之后角色或顺序调整影响。没有 question/mixed 角色时也可确认，但正式题面明确显示“待补题面”；补选后可刷新看到更新。普通 intake 上传不会创建 `redo_process`，回测过程只能由 redo 上传路径创建；旧数据中的回测角色仍可在错题详情改回普通角色。专用 redo 上传会将新图保存为 `redo_process`，写入回测草稿并在提交后保留其 asset_id。到期回测只显示题面，可上传一张或多张 `redo_process` 图片，提交后显示比较/诊断，比较失败不阻塞保存。
 - 确认不要求答案、错误原因或解题断点完整；缺少内容以“待补充”显示，确认后仍可在正式错题详情继续编辑和补充，不设置技术门禁。
@@ -37,7 +40,9 @@ python3 app.py serve
 python3 app.py --db /tmp/knowledge-demo.sqlite seed --force --as-of 2026-09-01T00:00:00Z
 ```
 
-浏览器打开 <http://127.0.0.1:8765/>。
+浏览器打开 <http://127.0.0.1:8765/>。首页不要求复制 `artifact_id` 或 `question_id`；“高级操作”折叠区仅保留兼容的手动 ID 入口。
+
+模型配置在首页“模型设置”区域完成，保存后立即生效：协议可选 `openai_chat`、`openai_responses`、`anthropic_messages`，主模型必填，回退模型可留空。API key 只在保存时写入本地 SQLite，读取接口只返回是否已配置；留空 key 表示保留原值。也可以直接使用 `GET/PATCH /api/settings/model`。
 
 ### macOS 到期提醒（E1）
 
@@ -72,19 +77,19 @@ curl -X POST http://127.0.0.1:8765/api/capture/source \
   -d '{"source_name":"笔记","raw_text":"第一段\n\n第二段"}'
 ```
 
-资料收录返回 `source_artifact_id` 后，可按需执行一次本地文本/PDF 文本层增强：
+资料收录后浏览器会为每个文件顺序执行一次本地文本/PDF/DOCX 增强；失败的文件可以在资料列表中单独重试。兼容脚本仍可手工指定 artifact：
 
 ```bash
 python3 app.py enrich --artifact-id <id>
 ```
 
-增强会把文本或 PDF 文本层切成 `SourcePassage` 并同步到 SQLite FTS5 trigram 索引；PDF passage 带有 1-based `page_no` 和 `locator_json`，重复执行会复用原有 passage ID。也可以通过 `POST /api/enrich` 传入 `source_artifact_id` 手动增强，失败后保留资料并允许再次重试。搜索接口为 `GET /api/search?q=傅里叶`，三字符以上走 trigram FTS，短查询走简单 LIKE，结果包含 `source_artifact_id` 和 `locator_json`。旧库首次启动会补建并提交索引。搜索命中后可通过 `POST /api/question-source-link` 把已有 passage 关联到题目，再用 `GET /api/question/<id>/sources` 读取出处。`POST /api/answer` 会优先使用题目已关联 passage，再合并 FTS 命中，调用环境变量配置的 OpenAI-compatible chat/completions；没有 LLM 配置或调用失败时仍保存并返回 `unavailable`，没有来源但调用成功时返回 `unlocated`。服务重启后仍可通过 `/api/source/<id>` 查看资料、搜索和回链，通过 `/api/answer/<id>` 读取已保存回答。
+增强会把文本或 PDF 文本层切成 `SourcePassage` 并同步到 SQLite FTS5 trigram 索引；PDF passage 带有 1-based `page_no` 和 `locator_json`，重复执行会复用原有 passage ID。也可以通过 `POST /api/enrich` 传入 `source_artifact_id` 手动增强，失败后保留资料并允许再次重试。搜索接口为 `GET /api/search?q=傅里叶`，三字符以上走 trigram FTS，短查询走简单 LIKE，结果包含 `source_artifact_id` 和 `locator_json`。旧库首次启动会补建并提交索引。搜索命中后可通过 `POST /api/question-source-link` 把已有 passage 关联到题目，再用 `GET /api/question/<id>/sources` 读取出处。`POST /api/answer` 会优先使用题目已关联 passage，再合并 FTS 命中，调用已保存模型配置或环境变量中的 OpenAI-compatible chat/completions；没有 LLM 配置或调用失败时仍保存并返回 `unavailable`，没有来源但调用成功时返回 `unlocated`。服务重启后仍可通过 `/api/source/<id>` 查看资料、搜索和回链，通过 `GET /api/sources?limit=30` 查看最近资料。
 
 资料详情使用 `GET /api/source/:id` 查看资料、解析状态和 passages。
 
 回答详情使用 `GET /api/answer/:id` 读取已保存回答。
 
-回答入口只读取 `LLM_BASE_URL`、`LLM_API_KEY`、`LLM_MODEL` 三个环境变量，不要求模型返回 JSON 或引用字段：
+兼容的回答入口仍可读取 `LLM_BASE_URL`、`LLM_API_KEY`、`LLM_MODEL` 三个环境变量，不要求模型返回 JSON 或引用字段；首页模型设置优先于这些环境变量：
 
 ```bash
 export LLM_BASE_URL=http://127.0.0.1:8000/v1
@@ -109,7 +114,7 @@ python3 run_p0_scenarios.py
 1. 已完成真实收录：题目文字、本人作答、资料文本或路径会写入 SQLite，缺字段也保存。
 2. FTS5 已完成：使用 `trigram` 支持中文片段，短词用 `LIKE` 补足；`/api/search?q=...` 返回 passage 和出处定位，零命中仍返回空结果，重复 `enrich` 保留 passage_id。
 3. 出处回链已完成：搜索命中可关联到题目，题目详情返回 passage 和 locator，不做自动对齐或评分。
-4. 资料解析已完成最小闭环：文字 PDF 使用现有 `pypdf` 按页提取；扫描/混合 PDF 空页和资料图片使用可选、懒加载的 PaddleOCR（依赖缺失时保留原文件并返回 `unavailable`）；DOCX 使用懒加载 `python-docx` 提取段落和表格单元格。所有结果写入同一套 `SourcePassage`、FTS 和 page/locator；OCR 只用于资料检索，复杂版面仍不宣称完全覆盖。
+4. 资料解析已完成最小闭环：文字 PDF 使用现有 `pypdf` 按页提取；扫描/混合 PDF 空页和资料图片使用可选、懒加载的 PaddleOCR（依赖缺失时保留原文件并返回 `unavailable`）；DOCX 使用懒加载 `python-docx` 提取段落和表格单元格。所有结果写入同一套 `SourcePassage`、FTS 和 page/locator；OCR 只用于资料检索，复杂版面仍不宣称完全覆盖。浏览器会在保存后逐份自动增强，并提供最近资料列表。
 5. Context Composer + LLM 薄切片已完成：先使用已关联 passage，再合并现有 FTS 命中，返回服务端实际出处；未定位或 LLM 不可用都不阻断保存。
 6. 只有真实需要跨章节、多跳关系时才接入一个 [LightRAG](https://github.com/HKUDS/LightRAG) REST sidecar；不同时运行两套图/向量索引。若需要更强布局解析，再单独评估 [Docling](https://github.com/docling-project/docling)。
 7. 图片错题按确认时间依次安排 +3/+7/+10/+14 天，第 14 天后停止自动排程；旧文字演示链仅用于迁移，不作为新的间隔规则基线。macOS 通知已实现，FSRS 后置。

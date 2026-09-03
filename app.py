@@ -126,6 +126,15 @@ class Store:
         if "subject_key" not in columns:
             self.conn.execute("ALTER TABLE SourceArtifact ADD COLUMN subject_key TEXT")
             self.conn.commit()
+        # Model endpoint preferences are deliberately tiny and local.  The
+        # table lives here (rather than schema.sql) so an existing checkout can
+        # start using the WebUI settings without a migration framework.
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS ModelEndpoint ("
+            "slot TEXT PRIMARY KEY CHECK(slot IN ('primary','fallback')),"
+            "protocol TEXT, base_url TEXT, api_key TEXT, model TEXT, updated_at TEXT NOT NULL)"
+        )
+        self.conn.commit()
         self._ensure_source_fts()
         self.lock = threading.RLock()
 
@@ -921,6 +930,86 @@ class Store:
         )
         return [dict(row) for row in rows]
 
+    def _model_slot_payload(self, slot):
+        """Return one effective provider config without exposing API keys."""
+        prefix = "LLM" if slot == "primary" else "LLM_FALLBACK"
+        env_protocol, env_base, env_key, env_model = self._provider_config_env(prefix)
+        row = self.one("SELECT protocol,base_url,api_key,model,updated_at FROM ModelEndpoint WHERE slot=?", (slot,))
+        if row:
+            protocol = row["protocol"] if row["protocol"] is not None else env_protocol
+            base_url = row["base_url"] if row["base_url"] is not None else env_base
+            api_key = row["api_key"] if row["api_key"] else env_key
+            model = row["model"] if row["model"] is not None else env_model
+            updated_at = row["updated_at"]
+            configured = bool(api_key)
+        else:
+            protocol, base_url, api_key, model = env_protocol, env_base, env_key, env_model
+            updated_at = None
+            configured = bool(api_key)
+        return {"protocol": protocol or "openai_chat", "base_url": base_url or "", "model": model or "", "api_key_configured": configured, "updated_at": updated_at}
+
+    def get_model_settings(self):
+        return {"primary": self._model_slot_payload("primary"), "fallback": self._model_slot_payload("fallback")}
+
+    def patch_model_settings(self, payload):
+        payload = as_dict(payload)
+        # Accept the natural {primary:{...},fallback:{...}} shape while also
+        # tolerating a single-slot payload from a small client form.
+        slots = {slot: as_dict(payload.get(slot)) for slot in ("primary", "fallback") if isinstance(payload.get(slot), dict)}
+        if not slots and any(key in payload for key in ("slot", "protocol", "base_url", "api_key", "model")):
+            slot = payload.get("slot") if payload.get("slot") in ("primary", "fallback") else "primary"
+            slots = {slot: payload}
+        if not slots:
+            return self.get_model_settings()
+        self.begin()
+        try:
+            for slot, values in slots.items():
+                old = self.one("SELECT protocol,base_url,api_key,model FROM ModelEndpoint WHERE slot=?", (slot,))
+                current = dict(old) if old else {}
+                prefix = "LLM" if slot == "primary" else "LLM_FALLBACK"
+                env_protocol, env_base, env_key, env_model = self._provider_config_env(prefix)
+                protocol = values.get("protocol", current.get("protocol", env_protocol))
+                if protocol not in {"openai_chat", "openai_responses", "anthropic_messages"}:
+                    protocol = current.get("protocol") or env_protocol or "openai_chat"
+                base_url = values.get("base_url", current.get("base_url", env_base))
+                model = values.get("model", current.get("model", env_model))
+                # An empty API key means “leave the current key alone”; this
+                # avoids erasing a configured secret when a password input is
+                # intentionally left blank.
+                submitted_key = values.get("api_key")
+                if isinstance(submitted_key, str) and submitted_key:
+                    api_key = submitted_key
+                else:
+                    api_key = current.get("api_key") if current.get("api_key") is not None else (env_key or None)
+                updated = self.clock()
+                self.conn.execute(
+                    "INSERT INTO ModelEndpoint(slot,protocol,base_url,api_key,model,updated_at) VALUES(?,?,?,?,?,?) "
+                    "ON CONFLICT(slot) DO UPDATE SET protocol=excluded.protocol,base_url=excluded.base_url,api_key=excluded.api_key,model=excluded.model,updated_at=excluded.updated_at",
+                    (slot, protocol, base_url if base_url is not None else "", api_key, model if model is not None else "", updated),
+                )
+            self.commit()
+        except Exception:
+            self.rollback()
+            raise
+        return self.get_model_settings()
+
+    def list_sources(self, limit=30):
+        try:
+            limit = max(1, min(int(limit), 100))
+        except (TypeError, ValueError):
+            limit = 30
+        rows = self.all("SELECT * FROM SourceArtifact ORDER BY created_at DESC,source_artifact_id DESC LIMIT ?", (limit,))
+        result = []
+        for row in rows:
+            item = dict(row)
+            payload = as_dict(loads(row["raw_payload"], {}))
+            item["parse_error"] = as_text(payload.get("parse_error") or payload.get("save_error"))
+            passages = self.all("SELECT source_passage_id,ordinal,text,page_no,locator_json FROM SourcePassage WHERE source_artifact_id=? ORDER BY ordinal", (row["source_artifact_id"],))
+            item["passage_count"] = len(passages)
+            item["passages"] = [dict(passage) for passage in passages]
+            result.append(item)
+        return result
+
     def retrieve(self, query, primary_subject=None, related_subjects=None, limit=8):
         """Single FTS/LIKE retriever used by search, resolve and answering."""
         import re
@@ -985,6 +1074,14 @@ class Store:
         result.sort(key=lambda item: (item.pop("_subject_rank", 1), item.get("score") is None, item.get("score") if item.get("score") is not None else 0, item.get("source_artifact_id") or ""))
         return result[:max(1, int(limit))]
 
+    def _light_cross_subjects(self, primary_subject):
+        """Return the only implicit cross-subject fallback allowed in F1."""
+        if primary_subject == "math":
+            return ["professional"]
+        if primary_subject == "professional":
+            return ["math"]
+        return []
+
     def search_sources(self, query):
         return self.retrieve(query)
 
@@ -1023,12 +1120,25 @@ class Store:
         except (OSError, ValueError, TypeError, IndexError) as error:
             return "", model_provider, False, str(error)
 
-    def _provider_config(self, prefix="LLM"):
+    def _provider_config_env(self, prefix="LLM"):
         protocol = os.environ.get(f"{prefix}_PROTOCOL", "openai_chat").strip() or "openai_chat"
         base_url = os.environ.get(f"{prefix}_BASE_URL", "").strip()
         api_key = os.environ.get(f"{prefix}_API_KEY", "").strip()
         model = os.environ.get(f"{prefix}_MODEL", "").strip()
         return protocol, base_url, api_key, model
+
+    def _provider_config(self, prefix="LLM"):
+        """Resolve saved WebUI settings first, then environment variables."""
+        slot = "primary" if prefix == "LLM" else "fallback"
+        env = self._provider_config_env(prefix)
+        row = self.one("SELECT protocol,base_url,api_key,model FROM ModelEndpoint WHERE slot=?", (slot,))
+        if not row:
+            return env
+        protocol = row["protocol"] if row["protocol"] is not None else env[0]
+        base_url = row["base_url"] if row["base_url"] is not None else env[1]
+        api_key = row["api_key"] if row["api_key"] else env[2]
+        model = row["model"] if row["model"] is not None else env[3]
+        return protocol or "openai_chat", base_url or "", api_key or "", model or ""
 
     def _provider_text(self, body, protocol):
         if protocol == "openai_chat":
@@ -1200,8 +1310,8 @@ class Store:
         # then optionally ask the same model to re-check its draft against
         # real, server-resolved passages.
         query_text = as_text(draft.get("question_text")).strip() or as_text(draft.get("raw_analysis")).strip()
-        related = []
         primary_subject = draft.get("subject_key") if draft.get("subject_key") in SUBJECT_KEYS else row["subject_key"]
+        related = self._light_cross_subjects(primary_subject)
         retrieved = self.retrieve(query_text, primary_subject=primary_subject, related_subjects=related, limit=8) if query_text else []
         source_refs = [{"source_passage_id": item.get("source_passage_id"), "source_artifact_id": item.get("source_artifact_id"), "source_name": item.get("source_name"), "page_no": item.get("page_no"), "bbox": item.get("bbox"), "locator": item.get("locator")} for item in retrieved]
         context = "\n\n".join(f"[S{index}] {item.get('source_name') or item.get('source_artifact_id') or '资料'} / 第{item.get('page_no') or '--'}页 / {item.get('locator') or '--'}\n{item.get('text') or ''}" for index, item in enumerate(retrieved, 1))
@@ -1257,7 +1367,8 @@ class Store:
         query = as_text(draft.get("question_text")).strip() or as_text(draft.get("raw_analysis")).strip()
         candidates, seen = [], set()
         if query:
-            fts_rows = self.retrieve(query[:120], primary_subject=draft.get("subject_key") if draft.get("subject_key") in SUBJECT_KEYS else row["subject_key"], limit=8)
+            primary_subject = draft.get("subject_key") if draft.get("subject_key") in SUBJECT_KEYS else row["subject_key"]
+            fts_rows = self.retrieve(query[:120], primary_subject=primary_subject, related_subjects=self._light_cross_subjects(primary_subject), limit=8)
             for item in fts_rows[:8]:
                 key = item.get("source_passage_id")
                 if key in seen: continue
@@ -2334,6 +2445,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, {"data": self.store.north_star_events()})
             if path == "/api/intake":
                 return self._json(200, {"data": self.store.list_intakes()})
+            if path == "/api/sources":
+                query = parse_qs(urlparse(self.path).query, keep_blank_values=True)
+                limit = query.get("limit", [30])[0]
+                return self._json(200, {"data": self.store.list_sources(limit)})
+            if path == "/api/settings/model":
+                return self._json(200, {"data": self.store.get_model_settings()})
             if path == "/api/wrong-questions":
                 query = parse_qs(urlparse(self.path).query, keep_blank_values=True)
                 filters = {key: values[0] for key, values in query.items() if values}
@@ -2451,6 +2568,10 @@ class Handler(BaseHTTPRequestHandler):
     def do_PATCH(self):
         try:
             path = urlparse(self.path).path
+            if path == "/api/settings/model":
+                length = int(self.headers.get("Content-Length", 0))
+                payload = loads(self.rfile.read(length) or b"{}", {})
+                return self._json(200, {"data": self.store.patch_model_settings(payload)})
             if path.startswith("/api/attempts/"):
                 length = int(self.headers.get("Content-Length", 0))
                 payload = loads(self.rfile.read(length) or b"{}", {})
