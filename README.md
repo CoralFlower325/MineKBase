@@ -23,7 +23,7 @@
 - 正式错题本支持按科目、章节、知识点和题型做轻量精确筛选；不带筛选条件时仍显示分类为空的题目。
 - `notify_due.py` 和配套 LaunchAgent 脚本已提供每日一次、隐私友好的到期任务合并提醒；通知进程只读 SQLite，不写任务或调用模型。
 - 资料与回答接入保持四件薄对象：`SourceArtifact`、`SourcePassage`、`QuestionSourceLink`、`Answer`；回答状态 `grounded/unlocated/unavailable` 是结果状态，不是流程门禁。
-- 资料收录支持浏览器 multipart PDF/PNG/JPG/DOCX；原文件立即保存到 `objects/sources/`，增强复用 `SourcePassage`/FTS。文字 PDF 按页解析，扫描/混合 PDF 的空页和资料图片在调用增强时懒加载 PaddleOCR；OCR 依赖不可用时保留原文件并标记 unavailable。DOCX 使用懒加载的 `python-docx` 提取段落和表格单元格并保留 locator。OCR 只服务资料检索，不处理手写解题事实。图片错题分析会先读原图，再通过统一 `retrieve()` 召回带页码/locator 的资料并进行二次分析；无资料或模型不可用时保留原文件和可编辑草稿。
+- 资料收录支持浏览器 multipart PDF/PNG/JPG/DOCX 和普通静态网页 URL；原文件立即保存到 `objects/sources/`，增强复用 `SourcePassage`/FTS。文字 PDF 按页解析，扫描/混合 PDF 的空页和资料图片在调用增强时懒加载 PaddleOCR；OCR 依赖不可用时保留原文件并标记 unavailable。DOCX 使用懒加载的 `python-docx` 提取段落和表格单元格并保留 locator；网页抓取优先使用可选 trafilatura，缺失时回退标准库 HTMLParser，HTML 原文件保留且 passage locator 含 URL。OCR 只服务资料检索，不处理手写解题事实。图片错题分析会先读原图，再通过统一 `retrieve()` 召回带页码/locator 的资料并进行二次分析；无资料或模型不可用时保留原文件和可编辑草稿。
 
 ## 启动
 
@@ -77,7 +77,7 @@ curl -X POST http://127.0.0.1:8765/api/capture/source \
   -d '{"source_name":"笔记","raw_text":"第一段\n\n第二段"}'
 ```
 
-资料收录后浏览器会为每个文件顺序执行一次本地文本/PDF/DOCX 增强；失败的文件可以在资料列表中单独重试。兼容脚本仍可手工指定 artifact：
+资料收录后浏览器会为每个文件或网页 URL 顺序执行一次本地文本/PDF/DOCX/静态网页增强；网页正文优先使用可选 trafilatura，缺失时回退标准库 HTMLParser。失败的资料可以在最近资料列表中单独重试。兼容脚本仍可手工指定 artifact：
 
 ```bash
 python3 app.py enrich --artifact-id <id>

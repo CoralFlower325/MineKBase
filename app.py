@@ -126,15 +126,6 @@ class Store:
         if "subject_key" not in columns:
             self.conn.execute("ALTER TABLE SourceArtifact ADD COLUMN subject_key TEXT")
             self.conn.commit()
-        # Model endpoint preferences are deliberately tiny and local.  The
-        # table lives here (rather than schema.sql) so an existing checkout can
-        # start using the WebUI settings without a migration framework.
-        self.conn.execute(
-            "CREATE TABLE IF NOT EXISTS ModelEndpoint ("
-            "slot TEXT PRIMARY KEY CHECK(slot IN ('primary','fallback')),"
-            "protocol TEXT, base_url TEXT, api_key TEXT, model TEXT, updated_at TEXT NOT NULL)"
-        )
-        self.conn.commit()
         self._ensure_source_fts()
         self.lock = threading.RLock()
 
@@ -363,6 +354,10 @@ class Store:
                 stored_path = None
                 payload = {**payload, "save_error": str(error)}
             records.append((artifact_id, kind, filename, stored_path, None, {**payload, "filename": filename, "mime": mime}, subject))
+        if not records:
+            source_url = payload.get("source_url") if isinstance(payload.get("source_url"), str) else ""
+            if source_url.strip():
+                records.append((uid("source"), "webpage", source_name or source_url.strip(), None, None, {**payload, "source_url": source_url.strip()}, subject))
         if not records:
             raw_text = payload.get("raw_text")
             if not isinstance(raw_text, str):
@@ -739,10 +734,58 @@ class Store:
 
             is_pdf = isinstance(path, str) and path.lower().endswith(".pdf")
             is_docx = as_text(artifact["kind"]) == "docx" or (isinstance(path, str) and path.lower().endswith(".docx"))
+            is_webpage = as_text(artifact["kind"]) == "webpage"
             is_image = as_text(artifact["kind"]).startswith("image") or (isinstance(path, str) and Path(path).suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"})
             passages = []
             parse_warning = None
-            if is_docx:
+            if is_webpage:
+                payload = loads(artifact["raw_payload"], {})
+                source_url = as_text(as_dict(payload).get("source_url")).strip()
+                if not source_url:
+                    return mark_error("网页缺少 URL")
+                try:
+                    request = urllib.request.Request(source_url, headers={"User-Agent": "MineKBase/1.0"})
+                    with urllib.request.urlopen(request, timeout=20) as response:
+                        html_bytes = response.read()
+                        charset = response.headers.get_content_charset() or "utf-8"
+                    html = html_bytes.decode(charset, errors="replace")
+                    target = ROOT / "objects" / "sources" / f"{artifact_id}.html"
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(html_bytes)
+                    self.conn.execute("UPDATE SourceArtifact SET stored_path=? WHERE source_artifact_id=?", (str(target.relative_to(ROOT)), artifact_id))
+                    try:
+                        import trafilatura
+                        extracted = trafilatura.extract(html, include_comments=False, include_tables=True) or ""
+                    except Exception:
+                        extracted = ""
+                    if not extracted:
+                        from html.parser import HTMLParser
+                        class _PageText(HTMLParser):
+                            def __init__(self):
+                                super().__init__()
+                                self.skip = 0
+                                self.parts = []
+                            def handle_starttag(self, tag, attrs):
+                                if tag.lower() in {"script", "style", "noscript", "template"}: self.skip += 1
+                            def handle_endtag(self, tag):
+                                if tag.lower() in {"script", "style", "noscript", "template"} and self.skip: self.skip -= 1
+                            def handle_data(self, data):
+                                if not self.skip and data.strip(): self.parts.append(" ".join(data.split()))
+                        parser = _PageText(); parser.feed(html)
+                        extracted = "\n\n".join(parser.parts)
+                    if not extracted.strip():
+                        return mark_error("网页正文为空")
+                    pieces = [piece.strip() for piece in extracted.replace("\r\n", "\n").split("\n\n") if piece.strip()]
+                    passages = [(piece, None, None, {"parser": "webpage", "url": source_url}) for piece in pieces]
+                    text_value = "\n\n".join(piece for piece, *_ in passages)
+                except Exception as error:
+                    payload = loads(artifact["raw_payload"], {})
+                    if not isinstance(payload, dict): payload = {"raw_payload": payload}
+                    payload["parse_error"] = str(error)
+                    self.conn.execute("UPDATE SourceArtifact SET raw_payload=?,parse_state='unavailable' WHERE source_artifact_id=?", (dumps(payload), artifact_id))
+                    self.commit()
+                    return {"source_artifact_id": artifact_id, "parse_state": "unavailable", "error": str(error), "source_passage_ids": []}
+            elif is_docx:
                 try:
                     from docx import Document
                     document = Document(str(file_path or path))
@@ -1004,6 +1047,7 @@ class Store:
             item = dict(row)
             payload = as_dict(loads(row["raw_payload"], {}))
             item["parse_error"] = as_text(payload.get("parse_error") or payload.get("save_error"))
+            item["source_url"] = as_text(payload.get("source_url"))
             passages = self.all("SELECT source_passage_id,ordinal,text,page_no,locator_json FROM SourcePassage WHERE source_artifact_id=? ORDER BY ordinal", (row["source_artifact_id"],))
             item["passage_count"] = len(passages)
             item["passages"] = [dict(passage) for passage in passages]
@@ -1086,39 +1130,17 @@ class Store:
         return self.retrieve(query)
 
     def _llm_chat(self, messages):
-        base_url = os.environ.get("LLM_BASE_URL", "").strip()
-        api_key = os.environ.get("LLM_API_KEY", "").strip()
-        model = os.environ.get("LLM_MODEL", "").strip()
-        provider_name = urlparse(base_url).netloc or base_url.rstrip("/")
-        model_provider = f"{provider_name}/{model}" if (base_url or model) else None
-        if not base_url or not model:
-            return "", model_provider, False, "LLM_BASE_URL or LLM_MODEL is not configured"
-        normalized_base = base_url.rstrip("/")
-        if normalized_base.endswith("/chat/completions"):
-            endpoint = normalized_base
-        elif normalized_base.endswith("/v1"):
-            endpoint = normalized_base + "/chat/completions"
-        else:
-            endpoint = normalized_base + "/v1/chat/completions"
-        request = urllib.request.Request(
-            endpoint,
-            data=dumps({"model": model, "messages": messages}).encode("utf-8"),
-            headers={"Content-Type": "application/json", **({"Authorization": f"Bearer {api_key}"} if api_key else {})},
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=10) as response:
-                body = loads(response.read(), {})
-            choices = body.get("choices") if isinstance(body, dict) else None
-            message = as_dict(choices[0]).get("message") if isinstance(choices, list) and choices else {}
-            answer = message.get("content") if isinstance(message, dict) else ""
-            if isinstance(answer, list):
-                answer = "".join(as_text(as_dict(part).get("text")) for part in answer)
-            if not isinstance(answer, str):
-                raise ValueError("chat completion did not contain text content")
-            return answer, model_provider, True, None
-        except (OSError, ValueError, TypeError, IndexError) as error:
-            return "", model_provider, False, str(error)
+        prompt_parts = []
+        for message in messages if isinstance(messages, list) else []:
+            content = message.get("content") if isinstance(message, dict) else ""
+            if isinstance(content, str):
+                prompt_parts.append(content)
+            elif isinstance(content, list):
+                prompt_parts.extend(as_text(as_dict(part).get("text")) for part in content if isinstance(part, dict))
+        raw, provider_label, errors = self._invoke_with_fallback("\n\n".join(part for part in prompt_parts if part), [])
+        if raw:
+            return raw, provider_label, True, None
+        return "", provider_label, False, "；".join(errors) or "provider unavailable"
 
     def _provider_config_env(self, prefix="LLM"):
         protocol = os.environ.get(f"{prefix}_PROTOCOL", "openai_chat").strip() or "openai_chat"

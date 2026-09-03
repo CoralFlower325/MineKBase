@@ -55,7 +55,7 @@ question_type     可空、可编辑
 
 - 一次上传默认代表一张错题卡，可以包含一张或多张图片；保留上传顺序。
 - 图片角色可以是 question（题面）、my_process（自己的解题过程）、reference（可选标准答案）、redo_process（回测时的新过程）或 mixed（同一张图同时含题面和过程）。角色可由用户指定或修正；确认时没有 question/mixed 仍允许进入错题本并标记“待补题面”，不设置门禁；确认后可在错题详情补选题面、解题过程、参考答案和顺序，只同步当前 Question 的展示/ grading 资产引用，不改历史 Attempt。历史 Attempt 和已开始 ReviewSession 按各自快照中的 asset_id 保持原图及顺序，不受后续角色编辑影响。普通 intake 上传不会创建 `redo_process`，专用 redo 上传才会将新图写入 `redo_process` 并保存到回测草稿；旧数据中的 `redo_process` 可在错题详情改回普通角色。未指定时模型按整组图片上下文理解，自动角色建议/回写留作后续薄补丁；不要求先裁剪图片。标准答案可以在首次上传时提供，也可以稍后追加到同一 intake。没有标准答案时先保存到 intake，等待模型解答或用户补充。
-- 教材、讲义、笔记作为资料输入，当前支持文字 PDF、扫描 PDF、DOCX 和图片；网页资料入口后置。
+- 教材、讲义、笔记作为资料输入，当前支持文字 PDF、扫描 PDF、DOCX、图片和普通静态网页 URL；动态登录、无限滚动网页后置。
 - 题库和答案库是可选资料源，不是系统前置条件。
 
 ### 1.3 不在当前边界
@@ -199,7 +199,7 @@ flowchart TD
 → 有真实需要再增加向量召回或 LightRAG
 ~~~
 
-文字 PDF 先用现有 pypdf；浏览器上传的 PDF/PNG/JPG/DOCX 原文件先保存到 `objects/sources/`，文字层 PDF 继续按页解析，扫描/混合 PDF 的空文字页和资料图片在点击增强时懒加载单一 `ocr_adapter.py`（PaddleOCR 3.x），DOCX 懒加载 `python-docx` 提取段落和表格单元格。所有结果仍输出同一种 Passage，尽量保留 page_no、bbox 和 locator_json（DOCX locator 至少含 parser、paragraph 或 table/row/cell）；OCR 不可用只标记 unavailable/error，原文件和资料记录保留可重试。OCR 只生成资料检索派生文本，不替代视觉模型对手写题面和过程的理解。网页和复杂版面仍后置。
+文字 PDF 先用现有 pypdf；浏览器上传的 PDF/PNG/JPG/DOCX 或普通静态网页 URL 原文件先保存到 `objects/sources/`，文字层 PDF 继续按页解析，扫描/混合 PDF 的空文字页和资料图片在点击增强时懒加载单一 `ocr_adapter.py`（PaddleOCR 3.x），DOCX 懒加载 `python-docx` 提取段落和表格单元格，网页抓取优先使用可选 trafilatura、缺失时回退标准库 HTMLParser。所有结果仍输出同一种 Passage，尽量保留 page_no、bbox 和 locator_json（DOCX locator 至少含 parser、paragraph 或 table/row/cell；网页 locator 含 parser、url、ordinal）；OCR 不可用或网页抓取失败只标记 unavailable/error，原文件和资料记录保留可重试。OCR 只生成资料检索派生文本，不替代视觉模型对手写题面和过程的理解。网页仅支持静态抓取，不做登录、滚动或批量爬站。
 
 ### 6.2 召回顺序
 
@@ -321,7 +321,7 @@ GET   /api/reviews/due                   # 到期题面和日期
 
 ### E2. 资料扩展（已接通最小闭环）
 
-文字 PDF、资料图片和 DOCX 已沿现有 SourceArtifact → SourcePassage → FTS 链路接通：原文件落盘，pypdf 按页解析，扫描/混合 PDF 空页和图片可选使用 PaddleOCR，DOCX 使用懒加载 python-docx 解析段落与表格并保留 locator；解析依赖缺失时保留原文件并标记 unavailable，可重试。浏览器多文件上传后逐份自动增强，最近资料可从 `/api/sources` 查看，单份资料仍可重试。图片题分析会复用现有 retrieve()，将真实 passage/page/locator 放入二次模型上下文；数学和专业课按主科、未分类、另一科的顺序做轻量补召回，英语和政治不跨科。当前仍是 FTS/LIKE 轻量召回，不是语义相似题 RAG 或知识图谱；网页、向量库、LightRAG、FSRS 继续后置。
+文字 PDF、资料图片、DOCX 和普通静态网页已沿现有 SourceArtifact → SourcePassage → FTS 链路接通：原文件落盘，pypdf 按页解析，扫描/混合 PDF 空页和图片可选使用 PaddleOCR，DOCX 使用懒加载 python-docx 解析段落与表格并保留 locator，网页抓取优先 trafilatura、缺失时使用标准库 HTMLParser 并保留 URL locator；解析依赖或抓取失败时保留原文件并标记 unavailable，可重试。浏览器多文件上传后逐份自动增强，最近资料可从 `/api/sources` 查看，单份资料仍可重试。所有模型入口（回答、图片第一轮/资料复核）统一使用 WebUI 保存的 primary/fallback 配置，未保存时回退环境变量。图片题分析会复用现有 retrieve()，将真实 passage/page/locator 放入二次模型上下文；数学和专业课按主科、未分类、另一科的顺序做轻量补召回，英语和政治不跨科。当前仍是 FTS/LIKE 轻量召回，不是语义相似题 RAG 或知识图谱；网页动态登录、向量库、LightRAG、FSRS 继续后置。
 
 ### F. 真实数据后再评估
 
@@ -338,8 +338,8 @@ GET   /api/reviews/due                   # 到期题面和日期
 | 项目 | 复用结论 | 何时引入 | 明确不吸收 |
 | --- | --- | --- | --- |
 | [py-pdf/pypdf](https://github.com/py-pdf/pypdf) | 已用于有文本层 PDF 的按页提取 | 现在继续用 | 图片理解、手写和复杂版面 |
-| [microsoft/markitdown](https://github.com/microsoft/markitdown) | 将 Word、Office、HTML 等资料转为统一 Markdown/文本，接入 MaterialArtifact → Passage | B/C 稳定后、真实 Word/网页出现时 | 不负责题目图片和解题诊断 |
-| [adbar/trafilatura](https://github.com/adbar/trafilatura) | 网页正文和元数据抽取，作为网页资料的轻量入口 | 真实网页资料出现且 MarkItDown 结果不够时 | 不负责题目图片和学习事实 |
+| [microsoft/markitdown](https://github.com/microsoft/markitdown) | 将 Word、Office、HTML 等资料转为统一 Markdown/文本，接入 MaterialArtifact → Passage | 复杂 Office/HTML 版面真实出现时再评估 | 不负责题目图片和解题诊断 |
+| [adbar/trafilatura](https://github.com/adbar/trafilatura) | 网页正文和元数据抽取，作为网页资料的可选增强 | 现在作为网页正文优先解析器（缺失时回退标准库） | 不负责题目图片和学习事实 |
 | [docling-project/docling](https://github.com/docling-project/docling) | 复杂 PDF/Office/表格/版面统一解析，可作为资料旁路 | 扫描或版面错乱成为实际问题时 | 不与现有解析器同时常驻、不替代原图 |
 | [opendatalab/MinerU](https://github.com/opendatalab/MinerU) | 扫描 PDF、公式、表格和图片的高保真解析备选 | Docling 不够且真实资料证明需要时二选一；先审许可证 | 不与 Docling/Pix2Text/PaddleOCR 全部并行 |
 | [HKUDS/LightRAG](https://github.com/HKUDS/LightRAG) | 唯一可选的图/向量 RAG sidecar；当前上游已吸收 RAG-Anything 的多模态方向 | 出现多跳/跨章节需求时 | 不拥有 SQLite 学习事实，不与另一套图 RAG 并行 |
@@ -374,7 +374,7 @@ GET   /api/reviews/due                   # 到期题面和日期
 ### 当前代码还没有（不能假装已完成）
 
 - FTS 仍不是语义相似题召回；数学↔专业课仅有主科优先、未分类其次、另一科最后的轻量补召回，不能替代语义检索；
-- 网页/复杂版面资料扩展，以及真实需要出现前的 LightRAG/向量旁路。
+- 复杂版面资料扩展，以及真实需要出现前的 LightRAG/向量旁路。
 
 ### 最终验收场景
 

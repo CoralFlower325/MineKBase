@@ -1,4 +1,5 @@
 PRAGMA foreign_keys = ON;
+CREATE TABLE IF NOT EXISTS ModelEndpoint (slot TEXT PRIMARY KEY CHECK(slot IN ('primary','fallback')), protocol TEXT, base_url TEXT, api_key TEXT, model TEXT, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS CoursePackRelease (release_id TEXT PRIMARY KEY, course_key TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS LearningObjective (learning_objective_id TEXT PRIMARY KEY, course_pack_release_id TEXT NOT NULL REFERENCES CoursePackRelease(release_id), name TEXT NOT NULL, description TEXT NOT NULL, observable_criteria TEXT NOT NULL, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS Question (question_id TEXT PRIMARY KEY, course_pack_release_id TEXT NOT NULL REFERENCES CoursePackRelease(release_id), current_question_revision_id TEXT, lifecycle_state TEXT NOT NULL CHECK(lifecycle_state IN ('candidate','active','archived')), created_at TEXT NOT NULL, FOREIGN KEY(current_question_revision_id) REFERENCES QuestionRevision(question_revision_id));
