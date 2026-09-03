@@ -199,7 +199,7 @@ flowchart TD
 → 有真实需要再增加向量召回或 LightRAG
 ~~~
 
-文字 PDF 先用现有 pypdf；浏览器上传的 PDF/PNG/JPG 原文件先保存到 `objects/sources/`，文字层 PDF 继续按页解析，无文本层 PDF 和资料图片在点击增强时懒加载单一 `ocr_adapter.py`（PaddleOCR 3.x）。所有结果仍输出同一种 Passage，尽量保留 page_no、bbox 和 locator_json；OCR 不可用只标记 unavailable/error，原文件和资料记录保留可重试。Word、HTML 和复杂版面仍保留兼容入口，不在本轮宣称完成。
+文字 PDF 先用现有 pypdf；浏览器上传的 PDF/PNG/JPG/DOCX 原文件先保存到 `objects/sources/`，文字层 PDF 继续按页解析，扫描/混合 PDF 的空文字页和资料图片在点击增强时懒加载单一 `ocr_adapter.py`（PaddleOCR 3.x），DOCX 懒加载 `python-docx` 提取段落和表格单元格。所有结果仍输出同一种 Passage，尽量保留 page_no、bbox 和 locator_json（DOCX locator 至少含 parser、paragraph 或 table/row/cell）；OCR 不可用只标记 unavailable/error，原文件和资料记录保留可重试。OCR 只生成资料检索派生文本，不替代视觉模型对手写题面和过程的理解。网页和复杂版面仍后置。
 
 ### 6.2 召回顺序
 
@@ -316,9 +316,9 @@ GET   /api/reviews/due                   # 到期题面和日期
 
 已加入每日一次的 LaunchAgent 检查：只读 SQLite 中已到期的 open ReviewTask，将数量、最早到期日期和 WebUI 提示合并成一条不含题面隐私的 macOS 通知；无到期任务时静默，不写数据库、不调用模型。
 
-### E2. 资料扩展（后置）
+### E2. 资料扩展（已接通最小闭环）
 
-下一种优先接入的真实资料格式建议为 Word DOCX：沿现有 SourceArtifact → SourcePassage → FTS 链路保存原文件并保留段落/表格 locator，再按真实样本决定是否引入单一轻量解析依赖。网页和更复杂的资料版面继续后置；扫描 PDF/资料图片 OCR 已作为可选 PaddleOCR 派生能力接入，不代表复杂版面已完全覆盖。
+文字 PDF、资料图片和 DOCX 已沿现有 SourceArtifact → SourcePassage → FTS 链路接通：原文件落盘，pypdf 按页解析，扫描/混合 PDF 空页和图片可选使用 PaddleOCR，DOCX 使用懒加载 python-docx 解析段落与表格并保留 locator；解析依赖缺失时保留原文件并标记 unavailable，可重试。图片题分析会复用现有 retrieve()，将真实 passage/page/locator 放入二次模型上下文。当前仍是 FTS/LIKE 轻量召回，不是语义相似题 RAG 或知识图谱；网页、向量库、LightRAG、FSRS 继续后置。
 
 ### F. 真实数据后再评估
 
@@ -370,7 +370,7 @@ GET   /api/reviews/due                   # 到期题面和日期
 ### 当前代码还没有（不能假装已完成）
 
 - FTS 仍不是语义相似题召回，数学↔专业课轻跨科仍按调用方显式传入；
-- Word/网页/复杂版面资料扩展，以及真实需要出现前的 LightRAG/向量旁路。
+- 网页/复杂版面资料扩展，以及真实需要出现前的 LightRAG/向量旁路。
 
 ### 最终验收场景
 

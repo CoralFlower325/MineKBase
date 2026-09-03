@@ -341,7 +341,7 @@ class Store:
             filename = (file.get("filename") or source_name or "material").strip() or "material"
             mime = file.get("mime") or mimetypes.guess_type(filename)[0] or "application/octet-stream"
             suffix = Path(filename).suffix[:12]
-            kind = "pdf" if mime == "application/pdf" or suffix.lower() == ".pdf" else "image" if mime.startswith("image/") else "file"
+            kind = "pdf" if mime == "application/pdf" or suffix.lower() == ".pdf" else "docx" if suffix.lower() == ".docx" or "wordprocessingml.document" in mime else "image" if mime.startswith("image/") else "file"
             artifact_id = uid("source")
             target = ROOT / "objects" / "sources" / f"{artifact_id}{suffix}"
             try:
@@ -729,9 +729,34 @@ class Store:
                 return {"source_artifact_id": artifact_id, "parse_state": "error", "error": message, "source_passage_ids": []}
 
             is_pdf = isinstance(path, str) and path.lower().endswith(".pdf")
+            is_docx = as_text(artifact["kind"]) == "docx" or (isinstance(path, str) and path.lower().endswith(".docx"))
             is_image = as_text(artifact["kind"]).startswith("image") or (isinstance(path, str) and Path(path).suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"})
             passages = []
-            if is_pdf:
+            parse_warning = None
+            if is_docx:
+                try:
+                    from docx import Document
+                    document = Document(str(file_path or path))
+                    for index, paragraph in enumerate(document.paragraphs, 1):
+                        text = paragraph.text.strip()
+                        if text:
+                            passages.append((text, None, None, {"parser": "docx", "paragraph": index}))
+                    for table_index, table in enumerate(document.tables, 1):
+                        for row_index, row in enumerate(table.rows, 1):
+                            for cell_index, cell in enumerate(row.cells, 1):
+                                text = cell.text.strip()
+                                if text:
+                                    passages.append((text, None, None, {"parser": "docx", "table": table_index, "row": row_index, "cell": cell_index}))
+                    if not passages: return mark_error("DOCX 没有可提取文本")
+                    text_value = "\n\n".join(piece for piece, *_ in passages)
+                except Exception as error:
+                    payload = loads(artifact["raw_payload"], {})
+                    if not isinstance(payload, dict): payload = {"raw_payload": payload}
+                    payload["parse_error"] = str(error)
+                    self.conn.execute("UPDATE SourceArtifact SET raw_payload=?,parse_state='unavailable' WHERE source_artifact_id=?", (dumps(payload), artifact_id))
+                    self.commit()
+                    return {"source_artifact_id": artifact_id, "parse_state": "unavailable", "error": str(error), "source_passage_ids": []}
+            elif is_pdf:
                 try:
                     from pypdf import PdfReader
                     reader = PdfReader(file_path or path)
@@ -747,15 +772,20 @@ class Store:
                         page_pieces = [piece.strip() for piece in page_text.replace("\r\n", "\n").split("\n\n") if piece.strip()]
                         for piece in page_pieces:
                             passages.append((piece, page_no))
-                    if passages:
-                        text_value = "\n\n".join(piece for piece, _ in passages)
-                    else:
-                        from ocr_adapter import extract_document
-                        ocr_rows = extract_document(file_path or path, "pdf")
-                        passages = [(row.get("text", "").strip(), row.get("page_no"), row.get("bbox"), {"parser": "ocr", "engine": "paddleocr", "page_no": row.get("page_no"), "bbox": row.get("bbox")}) for row in ocr_rows if row.get("text", "").strip()]
-                        if not passages:
-                            return mark_error("PDF 没有可提取文本，OCR 未返回内容")
-                        text_value = "\n\n".join(piece for piece, *_ in passages)
+                    empty_pages = [page_no for page_no, page_text in page_texts if not page_text.strip()]
+                    if empty_pages:
+                        try:
+                            from ocr_adapter import extract_document
+                            ocr_rows = extract_document(file_path or path, "pdf", pages=empty_pages)
+                            passages.extend((row.get("text", "").strip(), row.get("page_no"), row.get("bbox"), {"parser": "ocr", "engine": "paddleocr", "page_no": row.get("page_no"), "bbox": row.get("bbox")}) for row in ocr_rows if row.get("text", "").strip())
+                        except Exception as error:
+                            # Keep text-layer pages searchable even when the
+                            # optional OCR/rasterizer cannot handle blank pages.
+                            parse_warning = f"PDF OCR unavailable: {error}"
+                    if not passages:
+                        return mark_error("PDF 没有可提取文本，OCR 未返回内容")
+                    passages.sort(key=lambda item: (item[1] is None, item[1] or 0))
+                    text_value = "\n\n".join(piece for piece, *_ in passages)
                 except Exception as error:
                     message = f"PDF text/OCR extraction failed: {error}"
                     payload = loads(artifact["raw_payload"], {})
@@ -830,9 +860,18 @@ class Store:
             # QuestionSourceLink may still cite a trailing row.
             self.conn.execute("DELETE FROM SourcePassageFTS WHERE source_artifact_id=?", (artifact_id,))
             self.conn.execute("INSERT INTO SourcePassageFTS(source_passage_id,source_artifact_id,text) SELECT source_passage_id,source_artifact_id,COALESCE(text,'') FROM SourcePassage WHERE source_artifact_id=? ORDER BY ordinal", (artifact_id,))
-            self.conn.execute("UPDATE SourceArtifact SET raw_text=?,parse_state='ready' WHERE source_artifact_id=?", (text_value, artifact_id))
+            if parse_warning:
+                payload = loads(artifact["raw_payload"], {})
+                if not isinstance(payload, dict): payload = {"raw_payload": payload}
+                payload["parse_error"] = parse_warning
+            else:
+                payload = None
+            self.conn.execute("UPDATE SourceArtifact SET raw_text=?,raw_payload=COALESCE(?,raw_payload),parse_state=? WHERE source_artifact_id=?", (text_value, dumps(payload) if payload is not None else None, "unavailable" if parse_warning else "ready", artifact_id))
             self.commit()
-            return {"source_artifact_id": artifact_id, "parse_state": "ready", "source_passage_ids": passage_ids}
+            result = {"source_artifact_id": artifact_id, "parse_state": "unavailable" if parse_warning else "ready", "source_passage_ids": passage_ids}
+            if parse_warning:
+                result["error"] = parse_warning
+            return result
         except Exception:
             self.rollback()
             raise

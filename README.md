@@ -12,7 +12,7 @@
 - 用 SQL 投影显示今日任务、学习目标状态和北极星事件。
 - 无需模型、OCR、RAG 或额外服务即可运行 P0 演示链。
 - 可把搜索到的资料 passage 手动关联到题目，并在题目详情中查看出处定位。
-- 可通过 `enrich` 按页提取有文本层的 PDF，并保留页码定位。
+- 可通过 `enrich` 按页提取文字 PDF、扫描/资料图片和 DOCX（段落、表格），并保留页码或 DOCX 定位；扫描页 OCR 是可选增强。
 - 可用 `/api/answer` 基于题面、已关联出处和 FTS 命中生成普通文本回答；回答会保存到本地 SQLite，并由服务端返回真实 passage 出处。
 - 图片 intake 已支持多图视觉分析草稿、三种模型协议、回退、字段编辑和失败重试；分析失败时原图仍保留，不会自动生成正式错题。
 - 图片 intake 已支持基于现有 FTS/已确认题目的轻量候选召回；确认会保留题面、本人过程、参考答案原图并创建正式 Question/Attempt/ReviewTask；确认后仍可在错题详情补选题面、过程、参考答案角色并调整顺序，只同步当前 Question 展示引用和 grading 资产引用，不改历史 Attempt。历史 Attempt 按其快照中的 asset_id 展示，不受之后角色或顺序调整影响。没有 question/mixed 角色时也可确认，但正式题面明确显示“待补题面”；补选后可刷新看到更新。普通 intake 上传不会创建 `redo_process`，回测过程只能由 redo 上传路径创建；旧数据中的回测角色仍可在错题详情改回普通角色。专用 redo 上传会将新图保存为 `redo_process`，写入回测草稿并在提交后保留其 asset_id。到期回测只显示题面，可上传一张或多张 `redo_process` 图片，提交后显示比较/诊断，比较失败不阻塞保存。
@@ -20,7 +20,7 @@
 - 正式错题本支持按科目、章节、知识点和题型做轻量精确筛选；不带筛选条件时仍显示分类为空的题目。
 - `notify_due.py` 和配套 LaunchAgent 脚本已提供每日一次、隐私友好的到期任务合并提醒；通知进程只读 SQLite，不写任务或调用模型。
 - 资料与回答接入保持四件薄对象：`SourceArtifact`、`SourcePassage`、`QuestionSourceLink`、`Answer`；回答状态 `grounded/unlocated/unavailable` 是结果状态，不是流程门禁。
-- 资料收录支持浏览器 multipart PDF/PNG/JPG；原文件立即保存到 `objects/sources/`，增强复用 `SourcePassage`/FTS，图片和扫描 PDF 在调用增强时懒加载 PaddleOCR。图片错题分析会先读原图，再通过统一 `retrieve()` 召回带页码/locator 的资料并进行二次分析；无资料或 OCR/模型不可用时保留原文件和可编辑草稿。
+- 资料收录支持浏览器 multipart PDF/PNG/JPG/DOCX；原文件立即保存到 `objects/sources/`，增强复用 `SourcePassage`/FTS。文字 PDF 按页解析，扫描/混合 PDF 的空页和资料图片在调用增强时懒加载 PaddleOCR；OCR 依赖不可用时保留原文件并标记 unavailable。DOCX 使用懒加载的 `python-docx` 提取段落和表格单元格并保留 locator。OCR 只服务资料检索，不处理手写解题事实。图片错题分析会先读原图，再通过统一 `retrieve()` 召回带页码/locator 的资料并进行二次分析；无资料或模型不可用时保留原文件和可编辑草稿。
 
 ## 启动
 
@@ -109,7 +109,7 @@ python3 run_p0_scenarios.py
 1. 已完成真实收录：题目文字、本人作答、资料文本或路径会写入 SQLite，缺字段也保存。
 2. FTS5 已完成：使用 `trigram` 支持中文片段，短词用 `LIKE` 补足；`/api/search?q=...` 返回 passage 和出处定位，零命中仍返回空结果，重复 `enrich` 保留 passage_id。
 3. 出处回链已完成：搜索命中可关联到题目，题目详情返回 passage 和 locator，不做自动对齐或评分。
-4. PDF 文本层解析已完成：使用现有 `pypdf` 按页提取，写入同一套 `SourcePassage`、FTS 和 locator；扫描 PDF/资料图片使用可选、懒加载的 PaddleOCR，依赖缺失时返回 `unavailable` 并保留原文件，不宣称默认 OCR 已完全覆盖复杂版面。
+4. 资料解析已完成最小闭环：文字 PDF 使用现有 `pypdf` 按页提取；扫描/混合 PDF 空页和资料图片使用可选、懒加载的 PaddleOCR（依赖缺失时保留原文件并返回 `unavailable`）；DOCX 使用懒加载 `python-docx` 提取段落和表格单元格。所有结果写入同一套 `SourcePassage`、FTS 和 page/locator；OCR 只用于资料检索，复杂版面仍不宣称完全覆盖。
 5. Context Composer + LLM 薄切片已完成：先使用已关联 passage，再合并现有 FTS 命中，返回服务端实际出处；未定位或 LLM 不可用都不阻断保存。
 6. 只有真实需要跨章节、多跳关系时才接入一个 [LightRAG](https://github.com/HKUDS/LightRAG) REST sidecar；不同时运行两套图/向量索引。若需要更强布局解析，再单独评估 [Docling](https://github.com/docling-project/docling)。
 7. 图片错题按确认时间依次安排 +3/+7/+10/+14 天，第 14 天后停止自动排程；旧文字演示链仅用于迁移，不作为新的间隔规则基线。macOS 通知已实现，FSRS 后置。
