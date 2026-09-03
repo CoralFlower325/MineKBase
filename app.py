@@ -2406,6 +2406,7 @@ class Store:
             revision = self.one("SELECT grading_reference_fixture_snapshot FROM QuestionRevision WHERE question_revision_id=?", (item.get("question_revision_id"),)) if item.get("question_revision_id") else None
             grading = as_dict(loads(revision["grading_reference_fixture_snapshot"], {})) if revision else {}
             data_origin = as_text(grading.get("data_origin")) or ("real" if grading.get("intake_id") else "legacy")
+            item["subject_key"] = grading.get("subject_key") if grading.get("subject_key") in SUBJECT_KEYS else None
             item["data_origin"] = data_origin
             item["display_label"] = as_text(grading.get("display_label")) or ("演示/兼容" if data_origin in ("demo", "legacy") else "真实题目")
             items.append(item)
