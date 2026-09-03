@@ -1054,6 +1054,30 @@ class Store:
             result.append(item)
         return result
 
+    def compose_retrieval_query(self, draft=None, query=None, max_length=240):
+        """Build the one lexical query shared by all retrieval entry points."""
+        source = as_dict(draft)
+        values = [
+            source.get("question_text"),
+            source.get("chapter"),
+            source.get("knowledge_point"),
+            source.get("question_type"),
+            source.get("reference_answer"),
+        ]
+        if query and not values[0]:
+            values[0] = query
+        parts, seen = [], set()
+        import re
+        for value in values:
+            text = re.sub(r"\s+", " ", as_text(value)).strip()
+            if not text:
+                continue
+            if text in seen:
+                continue
+            seen.add(text)
+            parts.append(text)
+        return " ".join(parts)[:max(1, int(max_length))]
+
     def retrieve(self, query, primary_subject=None, related_subjects=None, limit=8):
         """Single FTS/LIKE retriever used by search, resolve and answering."""
         import re
@@ -1076,32 +1100,32 @@ class Store:
             allowed_subjects = [primary_subject] + related
             subject_clause = " AND (a.subject_key IS NULL OR a.subject_key IN (" + ",".join("?" for _ in allowed_subjects) + "))"
             subject_args.extend(allowed_subjects)
-        rows = []
+        fts_rows = []
         if chunks:
             match = " OR ".join('"' + token.replace('"', '""') + '"' for token in chunks)
             try:
-                rows = self.all(
+                fts_rows = self.all(
                     "SELECT p.source_passage_id,p.source_artifact_id,p.text,p.page_no,p.bbox,p.locator_json,a.source_name,a.subject_key,bm25(SourcePassageFTS) AS score "
                     "FROM SourcePassage p JOIN SourcePassageFTS f ON f.source_passage_id=p.source_passage_id "
                     "JOIN SourceArtifact a ON a.source_artifact_id=p.source_artifact_id WHERE SourcePassageFTS MATCH ?" + subject_clause + " ORDER BY score LIMIT ?",
                     (match, *subject_args, max(limit * 6, 24)),
                 )
             except sqlite3.OperationalError:
-                rows = []
-        if not rows or len(query) < 3:
-            like_terms = []
-            for term in terms:
-                if re.fullmatch(r"[\u4e00-\u9fff]+", term):
-                    like_terms.extend(term[i:i + 2] for i in range(max(1, len(term) - 1)))
-                elif len(term) >= 2:
-                    like_terms.append(term)
-            like_terms = list(dict.fromkeys(like_terms + [query]))[:12]
-            clauses = " OR ".join("COALESCE(p.text,'') LIKE ?" for _ in like_terms) or "COALESCE(p.text,'') LIKE ?"
-            rows = self.all(
-                "SELECT p.source_passage_id,p.source_artifact_id,p.text,p.page_no,p.bbox,p.locator_json,a.source_name,a.subject_key,NULL AS score "
-                f"FROM SourcePassage p JOIN SourceArtifact a ON a.source_artifact_id=p.source_artifact_id WHERE ({clauses})" + subject_clause + " ORDER BY p.source_artifact_id,p.ordinal",
-                tuple(f"%{term}%" for term in (like_terms or [query])) + tuple(subject_args),
-            )
+                fts_rows = []
+        like_terms = []
+        for term in terms:
+            if re.fullmatch(r"[\u4e00-\u9fff]+", term):
+                like_terms.extend(term[i:i + 2] for i in range(max(1, len(term) - 1)))
+            elif len(term) >= 2:
+                like_terms.append(term)
+        like_terms = list(dict.fromkeys(like_terms + [query]))[:12]
+        clauses = " OR ".join("(COALESCE(p.text,'') LIKE ? OR COALESCE(a.source_name,'') LIKE ?)" for _ in like_terms)
+        like_rows = self.all(
+            "SELECT p.source_passage_id,p.source_artifact_id,p.text,p.page_no,p.bbox,p.locator_json,a.source_name,a.subject_key,NULL AS score "
+            f"FROM SourcePassage p JOIN SourceArtifact a ON a.source_artifact_id=p.source_artifact_id WHERE ({clauses})" + subject_clause + " ORDER BY p.source_artifact_id,p.ordinal",
+            tuple(value for term in (like_terms or [query]) for value in (f"%{term}%", f"%{term}%")) + tuple(subject_args),
+        ) if clauses else []
+        rows = [*fts_rows, *like_rows]
         allowed = {primary_subject, None, *related} if primary_subject else None
         result, seen = [], set()
         for row in rows:
@@ -1125,6 +1149,29 @@ class Store:
         if primary_subject == "professional":
             return ["math"]
         return []
+
+    def _tag_candidates(self, draft, retrieved, primary_subject=None):
+        """Expose coarse, editable labels without introducing a tag store."""
+        current = {
+            "subject_key": draft.get("subject_key") or primary_subject,
+            "chapter": draft.get("chapter") or None,
+            "knowledge_point": draft.get("knowledge_point") or None,
+            "question_type": draft.get("question_type") or None,
+        }
+        candidates = []
+        if any(value not in (None, "") for value in current.values()):
+            candidates.append(current)
+        seen = {dumps(item) for item in candidates}
+        for item in retrieved or []:
+            subject = item.get("subject_key")
+            if subject not in SUBJECT_KEYS:
+                continue
+            candidate = {"subject_key": subject, "chapter": None, "knowledge_point": None, "question_type": None}
+            marker = dumps(candidate)
+            if marker not in seen:
+                seen.add(marker)
+                candidates.append(candidate)
+        return candidates
 
     def search_sources(self, query):
         return self.retrieve(query)
@@ -1331,13 +1378,13 @@ class Store:
         # Feed the coarse question understanding into the shared retriever,
         # then optionally ask the same model to re-check its draft against
         # real, server-resolved passages.
-        query_text = as_text(draft.get("question_text")).strip() or as_text(draft.get("raw_analysis")).strip()
         primary_subject = draft.get("subject_key") if draft.get("subject_key") in SUBJECT_KEYS else row["subject_key"]
+        query_text = self.compose_retrieval_query(draft, query=as_text(draft.get("raw_analysis")))
         related = self._light_cross_subjects(primary_subject)
         retrieved = self.retrieve(query_text, primary_subject=primary_subject, related_subjects=related, limit=8) if query_text else []
         source_refs = [{"source_passage_id": item.get("source_passage_id"), "source_artifact_id": item.get("source_artifact_id"), "source_name": item.get("source_name"), "page_no": item.get("page_no"), "bbox": item.get("bbox"), "locator": item.get("locator")} for item in retrieved]
         context = "\n\n".join(f"[S{index}] {item.get('source_name') or item.get('source_artifact_id') or '资料'} / 第{item.get('page_no') or '--'}页 / {item.get('locator') or '--'}\n{item.get('text') or ''}" for index, item in enumerate(retrieved, 1))
-        draft.update({"retrieval_status": "ready" if retrieved else "empty", "retrieved_context": context, "source_refs": source_refs, "grounding_label": "有资料依据" if retrieved else "未定位资料"})
+        draft.update({"retrieval_query": query_text, "retrieval_status": "ready" if retrieved else "empty", "retrieved_context": context, "source_refs": source_refs, "tag_candidates": self._tag_candidates(draft, retrieved, primary_subject), "grounding_label": "有资料依据" if retrieved else "未定位资料"})
         second_raw = ""
         second_errors = []
         if retrieved:
@@ -1353,7 +1400,7 @@ class Store:
                 for key, value in fields.items():
                     if value not in (None, "") and not draft.get(key):
                         draft[key] = value
-                draft.update({"raw_analysis": second_raw, "analysis_status": "draft", "analysis_error": "", "grounding_error": "", "grounding_label": "有资料依据"})
+                draft.update({"raw_analysis": second_raw, "analysis_status": "draft", "analysis_error": "", "grounding_error": "", "grounding_label": "有资料依据", "tag_candidates": self._tag_candidates(draft, retrieved, primary_subject)})
             except Exception as error:
                 draft.update({"analysis_status": "failed", "analysis_error": f"资料复核解析失败：{error}"})
         elif retrieved and second_errors:
@@ -1386,11 +1433,11 @@ class Store:
         if not row:
             raise DomainError("not_found", "intake not found", {"intake_id": intake_id})
         draft = loads(row["draft_fields"], {})
-        query = as_text(draft.get("question_text")).strip() or as_text(draft.get("raw_analysis")).strip()
+        query = self.compose_retrieval_query(draft, query=as_text(draft.get("raw_analysis")))
         candidates, seen = [], set()
         if query:
             primary_subject = draft.get("subject_key") if draft.get("subject_key") in SUBJECT_KEYS else row["subject_key"]
-            fts_rows = self.retrieve(query[:120], primary_subject=primary_subject, related_subjects=self._light_cross_subjects(primary_subject), limit=8)
+            fts_rows = self.retrieve(query, primary_subject=primary_subject, related_subjects=self._light_cross_subjects(primary_subject), limit=8)
             for item in fts_rows[:8]:
                 key = item.get("source_passage_id")
                 if key in seen: continue
@@ -1412,10 +1459,10 @@ class Store:
                 candidates.append({"kind":"question", "question_id":key, "question_revision_id":item["question_revision_id"], "question_text":question_text, "grading":{"reference_answer":as_text(grading.get("reference_answer"))}})
         subject = draft.get("subject_key") if draft.get("subject_key") in SUBJECT_KEYS else row["subject_key"]
         source_refs = [{k:c.get(k) for k in ("source_passage_id","source_artifact_id","locator") if c.get(k)} for c in candidates if c.get("kind")=="source"]
-        tag_candidates = [{"subject_key":subject, "chapter":draft.get("chapter") or None, "knowledge_point":draft.get("knowledge_point") or None, "question_type":draft.get("question_type") or None}]
+        tag_candidates = self._tag_candidates(draft, [c for c in candidates if c.get("kind") == "source"], subject)
         has_question = any(c.get("kind")=="question" for c in candidates)
         has_source = any(c.get("kind")=="source" for c in candidates)
-        draft.update({"resolution_kind":"matched" if has_question else "model", "resolution_label":"匹配题目" if has_question else "资料参考" if has_source else "待补充", "match_candidates":candidates, "source_refs":source_refs, "tag_candidates":tag_candidates, "answer_origin":"matched" if has_question else "reference_image" if any(a["role"]=="reference" for a in self.all("SELECT role FROM ImageAsset WHERE batch_id=?", (row["batch_id"],))) else "model"})
+        draft.update({"retrieval_query": query, "resolution_kind":"matched" if has_question else "model", "resolution_label":"匹配题目" if has_question else "资料参考" if has_source else "待补充", "match_candidates":candidates, "source_refs":source_refs, "tag_candidates":tag_candidates, "answer_origin":"matched" if has_question else "reference_image" if any(a["role"]=="reference" for a in self.all("SELECT role FROM ImageAsset WHERE batch_id=?", (row["batch_id"],))) else "model"})
         self.begin()
         try:
             self.conn.execute("UPDATE IntakeItem SET draft_fields=?,updated_at=? WHERE intake_id=?", (dumps(draft), self.clock(), intake_id)); self.commit()
@@ -1875,6 +1922,7 @@ class Store:
         question_id = None
         question_text = ""
         primary_subject = None
+        grading = {}
         linked = []
         if requested_question_id:
             question = self.one("SELECT * FROM Question WHERE question_id=?", (requested_question_id,))
@@ -1888,6 +1936,14 @@ class Store:
                 primary_subject = grading.get("subject_key") if grading.get("subject_key") in SUBJECT_KEYS else None
                 linked = self.get_question_sources(question_id)
 
+        retrieval_query = self.compose_retrieval_query({
+            "question_text": question_text,
+            "chapter": grading.get("chapter"),
+            "knowledge_point": grading.get("knowledge_point"),
+            "question_type": grading.get("question_type"),
+            "reference_answer": grading.get("reference_answer"),
+        }, query=query)
+
         selected = []
         seen = set()
         for row in linked:
@@ -1895,7 +1951,7 @@ class Store:
             if passage_id and passage_id not in seen:
                 seen.add(passage_id)
                 selected.append(dict(row))
-        for row in self.retrieve(query, primary_subject=primary_subject):
+        for row in self.retrieve(retrieval_query, primary_subject=primary_subject, related_subjects=self._light_cross_subjects(primary_subject)):
             passage_id = row.get("source_passage_id")
             if passage_id and passage_id not in seen:
                 seen.add(passage_id)
@@ -1918,7 +1974,7 @@ class Store:
         answer_text, model_provider, available, error = self._llm_chat(messages)
         status = "unavailable" if not available else "grounded" if sources else "unlocated"
         answer_id = uid("answer")
-        source_snapshot = {"question_id": question_id, "requested_question_id": requested_question_id, "query": query, "sources": sources, "context": context}
+        source_snapshot = {"question_id": question_id, "requested_question_id": requested_question_id, "query": query, "retrieval_query": retrieval_query, "sources": sources, "context": context}
         if error:
             source_snapshot["error"] = error
         self.begin()
