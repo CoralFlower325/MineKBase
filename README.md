@@ -20,6 +20,7 @@
 - 正式错题本支持按科目、章节、知识点和题型做轻量精确筛选；不带筛选条件时仍显示分类为空的题目。
 - `notify_due.py` 和配套 LaunchAgent 脚本已提供每日一次、隐私友好的到期任务合并提醒；通知进程只读 SQLite，不写任务或调用模型。
 - 资料与回答接入保持四件薄对象：`SourceArtifact`、`SourcePassage`、`QuestionSourceLink`、`Answer`；回答状态 `grounded/unlocated/unavailable` 是结果状态，不是流程门禁。
+- 资料收录支持浏览器 multipart PDF/PNG/JPG；原文件立即保存到 `objects/sources/`，增强复用 `SourcePassage`/FTS，图片和扫描 PDF 在调用增强时懒加载 PaddleOCR。图片错题分析会先读原图，再通过统一 `retrieve()` 召回带页码/locator 的资料并进行二次分析；无资料或 OCR/模型不可用时保留原文件和可编辑草稿。
 
 ## 启动
 

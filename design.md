@@ -106,7 +106,7 @@ analyze(image_assets, retrieved_context)
 
 科目边界留在本项目适配层，不散落到某个 RAG 或模型供应商实现中。
 
-1. 默认只检索当前题目的科目。
+1. 默认只检索当前题目的科目；未分类资料保留在同科结果之后。
 2. 数学与专业课允许轻量跨学科：先完成主科目检索；只有模型识别出数学前置依赖，或用户明确说明相关时，才追加一个小窗口的另一命名空间教材/笔记候选，并在界面标记“跨学科参考”。跨学科资料不能改变题目的主科目。
 3. 英语和政治不自动跨科检索。
 4. 未指定科目时可以从四个命名空间产生分类候选；用户确认后再归入具体科目。
@@ -199,13 +199,15 @@ flowchart TD
 → 有真实需要再增加向量召回或 LightRAG
 ~~~
 
-文字 PDF 先用现有 pypdf；Word、HTML、复杂版面和扫描资料分别接对应解析器，但都输出同一种 Passage。原图仍作为来源展示，不以 OCR 文本替代。
+文字 PDF 先用现有 pypdf；浏览器上传的 PDF/PNG/JPG 原文件先保存到 `objects/sources/`，文字层 PDF 继续按页解析，无文本层 PDF 和资料图片在点击增强时懒加载单一 `ocr_adapter.py`（PaddleOCR 3.x）。所有结果仍输出同一种 Passage，尽量保留 page_no、bbox 和 locator_json；OCR 不可用只标记 unavailable/error，原文件和资料记录保留可重试。Word、HTML 和复杂版面仍保留兼容入口，不在本轮宣称完成。
 
 ### 6.2 召回顺序
 
 ~~~text
-当前科目过滤
-→ FTS 关键词召回
+统一 `Store.retrieve(query, primary_subject, related_subjects?, limit=8)`
+→ 中文/英文片段 FTS5 召回（bm25 排序）
+→ 短查询 LIKE 兜底
+→ 当前科目过滤
 → （可选）向量补召回
 → （可选）数学/专业课轻量跨科补召回
 → 去重后交给模型

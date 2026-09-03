@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS SourceArtifact (
     stored_path TEXT,
     raw_text TEXT,
     raw_payload TEXT,
+    subject_key TEXT CHECK(subject_key IN ('math','english','politics','professional') OR subject_key IS NULL),
     parse_state TEXT NOT NULL DEFAULT 'pending',
     created_at TEXT NOT NULL
 );

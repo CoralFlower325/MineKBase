@@ -122,6 +122,10 @@ class Store:
         # schema.sql is the only structural source. Re-running its CREATE IF
         # NOT EXISTS statements avoids a second startup contract.
         self.conn.executescript((ROOT / "schema.sql").read_text())
+        columns = {row[1] for row in self.conn.execute("PRAGMA table_info(SourceArtifact)")}
+        if "subject_key" not in columns:
+            self.conn.execute("ALTER TABLE SourceArtifact ADD COLUMN subject_key TEXT")
+            self.conn.commit()
         self._ensure_source_fts()
         self.lock = threading.RLock()
 
@@ -325,38 +329,58 @@ class Store:
 
     # ---------- real, write-first capture ----------
 
-    def capture_source(self, payload):
-        """Persist any source payload before attempting to understand it."""
+    def capture_source(self, payload, files=None):
+        """Persist source text, paths, or multipart files before enrichment."""
         payload = payload if isinstance(payload, dict) else {"raw_payload": payload}
+        files = files or []
         created = self.clock()
-        artifact_id = uid("source")
-        raw_text = payload.get("raw_text")
-        if not isinstance(raw_text, str):
-            for key in ("text", "content"):
-                if isinstance(payload.get(key), str):
-                    raw_text = payload[key]
-                    break
-        stored_path = payload.get("stored_path")
-        if not isinstance(stored_path, str):
-            for key in ("file_path", "image_path", "path"):
-                if isinstance(payload.get(key), str):
-                    stored_path = payload[key]
-                    break
-        kind = payload.get("kind")
-        if not isinstance(kind, str) or not kind:
-            kind = "image" if payload.get("image_path") else "text" if isinstance(raw_text, str) else "file"
-        source_name = payload.get("source_name")
-        if not isinstance(source_name, str):
-            source_name = payload.get("name") if isinstance(payload.get("name"), str) else ""
+        subject = payload.get("subject_key") if payload.get("subject_key") in SUBJECT_KEYS else None
+        source_name = payload.get("source_name") if isinstance(payload.get("source_name"), str) else ""
+        records = []
+        for file in files:
+            filename = (file.get("filename") or source_name or "material").strip() or "material"
+            mime = file.get("mime") or mimetypes.guess_type(filename)[0] or "application/octet-stream"
+            suffix = Path(filename).suffix[:12]
+            kind = "pdf" if mime == "application/pdf" or suffix.lower() == ".pdf" else "image" if mime.startswith("image/") else "file"
+            artifact_id = uid("source")
+            target = ROOT / "objects" / "sources" / f"{artifact_id}{suffix}"
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(file.get("data") or b"")
+                stored_path = str(target.relative_to(ROOT))
+            except Exception as error:
+                # Preserve the DB record even if the copy fails; the failure is
+                # visible and can be retried without rolling back other files.
+                stored_path = None
+                payload = {**payload, "save_error": str(error)}
+            records.append((artifact_id, kind, filename, stored_path, None, {**payload, "filename": filename, "mime": mime}, subject))
+        if not records:
+            raw_text = payload.get("raw_text")
+            if not isinstance(raw_text, str):
+                for key in ("text", "content"):
+                    if isinstance(payload.get(key), str):
+                        raw_text = payload[key]
+                        break
+            stored_path = payload.get("stored_path")
+            if not isinstance(stored_path, str):
+                for key in ("file_path", "image_path", "path"):
+                    if isinstance(payload.get(key), str):
+                        stored_path = payload[key]
+                        break
+            kind = payload.get("kind") if isinstance(payload.get("kind"), str) and payload.get("kind") else "image" if payload.get("image_path") else "text" if isinstance(raw_text, str) else "file"
+            records.append((uid("source"), kind, source_name or (payload.get("name") if isinstance(payload.get("name"), str) else ""), stored_path if isinstance(stored_path, str) else None, raw_text if isinstance(raw_text, str) else None, payload, subject))
         self.begin()
         try:
-            self.conn.execute(
-                "INSERT INTO SourceArtifact(source_artifact_id,kind,source_name,stored_path,raw_text,raw_payload,parse_state,created_at) VALUES(?,?,?,?,?,?,?,?)",
-                (artifact_id, kind, source_name, stored_path if isinstance(stored_path, str) else None,
-                 raw_text if isinstance(raw_text, str) else None, dumps(payload), "pending", created),
-            )
+            for artifact_id, kind, name, stored_path, raw_text, raw_payload, subject_key in records:
+                self.conn.execute(
+                    "INSERT INTO SourceArtifact(source_artifact_id,kind,source_name,stored_path,raw_text,raw_payload,subject_key,parse_state,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                    (artifact_id, kind, name, stored_path, raw_text, dumps(raw_payload), subject_key, "pending", created),
+                )
             self.commit()
-            return {"source_artifact_id": artifact_id, "parse_state": "pending"}
+            result = {"source_artifact_id": records[0][0], "parse_state": "pending"}
+            if len(records) > 1:
+                result["source_artifact_ids"] = [record[0] for record in records]
+            return result
         except Exception:
             self.rollback()
             raise
@@ -693,6 +717,7 @@ class Store:
             if not artifact:
                 raise DomainError("not_found", "source artifact not found", {"source_artifact_id": artifact_id})
             path = artifact["stored_path"]
+            file_path = (ROOT / path) if isinstance(path, str) and not Path(path).is_absolute() else Path(path) if path else None
 
             def mark_error(message):
                 payload = loads(artifact["raw_payload"], {})
@@ -704,11 +729,12 @@ class Store:
                 return {"source_artifact_id": artifact_id, "parse_state": "error", "error": message, "source_passage_ids": []}
 
             is_pdf = isinstance(path, str) and path.lower().endswith(".pdf")
+            is_image = as_text(artifact["kind"]).startswith("image") or (isinstance(path, str) and Path(path).suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"})
             passages = []
             if is_pdf:
                 try:
                     from pypdf import PdfReader
-                    reader = PdfReader(path)
+                    reader = PdfReader(file_path or path)
                     page_texts = []
                     page_errors = []
                     for page_no, page in enumerate(reader.pages, 1):
@@ -721,27 +747,51 @@ class Store:
                         page_pieces = [piece.strip() for piece in page_text.replace("\r\n", "\n").split("\n\n") if piece.strip()]
                         for piece in page_pieces:
                             passages.append((piece, page_no))
-                    if not passages:
-                        message = "PDF has no extractable text layer"
-                        if page_errors:
-                            message += "; " + "; ".join(page_errors)
-                        return mark_error(message)
-                    text_value = "\n\n".join(piece for piece, _ in passages)
+                    if passages:
+                        text_value = "\n\n".join(piece for piece, _ in passages)
+                    else:
+                        from ocr_adapter import extract_document
+                        ocr_rows = extract_document(file_path or path, "pdf")
+                        passages = [(row.get("text", "").strip(), row.get("page_no"), row.get("bbox"), {"parser": "ocr", "engine": "paddleocr", "page_no": row.get("page_no"), "bbox": row.get("bbox")}) for row in ocr_rows if row.get("text", "").strip()]
+                        if not passages:
+                            return mark_error("PDF 没有可提取文本，OCR 未返回内容")
+                        text_value = "\n\n".join(piece for piece, *_ in passages)
                 except Exception as error:
-                    return mark_error(f"PDF text extraction failed: {error}")
+                    message = f"PDF text/OCR extraction failed: {error}"
+                    payload = loads(artifact["raw_payload"], {})
+                    if not isinstance(payload, dict): payload = {"raw_payload": payload}
+                    payload["parse_error"] = message
+                    self.conn.execute("UPDATE SourceArtifact SET raw_payload=?,parse_state='unavailable' WHERE source_artifact_id=?", (dumps(payload), artifact_id))
+                    self.commit()
+                    return {"source_artifact_id": artifact_id, "parse_state": "unavailable", "error": message, "source_passage_ids": []}
+            elif is_image:
+                try:
+                    from ocr_adapter import extract_document
+                    ocr_rows = extract_document(file_path or path, "image")
+                    passages = [(row.get("text", "").strip(), row.get("page_no"), row.get("bbox"), {"parser": "ocr", "engine": "paddleocr", "bbox": row.get("bbox")}) for row in ocr_rows if row.get("text", "").strip()]
+                    if not passages:
+                        return mark_error("图片 OCR 未返回文本")
+                    text_value = "\n\n".join(piece for piece, *_ in passages)
+                except Exception as error:
+                    payload = loads(artifact["raw_payload"], {})
+                    if not isinstance(payload, dict): payload = {"raw_payload": payload}
+                    payload["parse_error"] = str(error)
+                    self.conn.execute("UPDATE SourceArtifact SET raw_payload=?,parse_state='unavailable' WHERE source_artifact_id=?", (dumps(payload), artifact_id))
+                    self.commit()
+                    return {"source_artifact_id": artifact_id, "parse_state": "unavailable", "error": str(error), "source_passage_ids": []}
             else:
                 text_value = artifact["raw_text"]
                 if not isinstance(text_value, str) or not text_value:
-                    if path:
+                    if file_path:
                         try:
-                            text_value = Path(path).read_text(encoding="utf-8")
+                            text_value = file_path.read_text(encoding="utf-8")
                         except Exception as error:
                             return mark_error(str(error))
                 if not isinstance(text_value, str) or not text_value:
                     return mark_error("no plain text available")
-                passages = [(piece.strip(), None) for piece in text_value.replace("\r\n", "\n").split("\n\n") if piece.strip()]
+                passages = [(piece.strip(), None, None, {"parser": "text"}) for piece in text_value.replace("\r\n", "\n").split("\n\n") if piece.strip()]
                 if not passages:
-                    passages = [(text_value, None)]
+                    passages = [(text_value, None, None, {"parser": "text"})]
             existing = {
                 row["ordinal"]: row
                 for row in self.all(
@@ -750,20 +800,23 @@ class Store:
                 )
             }
             passage_ids = []
-            for ordinal, (piece, page_no) in enumerate(passages, 1):
+            for ordinal, entry in enumerate(passages, 1):
+                piece, page_no = entry[0], entry[1]
+                bbox = entry[2] if len(entry) > 2 else None
+                parser_locator = entry[3] if len(entry) > 3 else {"parser": "pypdf" if is_pdf else "text"}
                 current = existing.get(ordinal)
                 passage_id = current["source_passage_id"] if current else uid("passage")
                 passage_ids.append(passage_id)
-                locator = {"ordinal": ordinal}
+                locator = {"ordinal": ordinal, **as_dict(parser_locator)}
                 if page_no is not None:
                     locator["page_no"] = page_no
                 if current:
                     self.conn.execute(
-                        "UPDATE SourcePassage SET text=?,page_no=?,locator_json=? WHERE source_passage_id=?",
-                        (piece, page_no, dumps(locator), passage_id),
+                        "UPDATE SourcePassage SET text=?,page_no=?,bbox=?,locator_json=? WHERE source_passage_id=?",
+                        (piece, page_no, dumps(bbox) if bbox is not None else None, dumps(locator), passage_id),
                     )
                 else:
-                    self.conn.execute("INSERT INTO SourcePassage(source_passage_id,source_artifact_id,ordinal,text,page_no,bbox,locator_json,created_at) VALUES(?,?,?,?,?,?,?,?)", (passage_id, artifact_id, ordinal, piece, page_no, None, dumps(locator), self.clock()))
+                    self.conn.execute("INSERT INTO SourcePassage(source_passage_id,source_artifact_id,ordinal,text,page_no,bbox,locator_json,created_at) VALUES(?,?,?,?,?,?,?,?)", (passage_id, artifact_id, ordinal, piece, page_no, dumps(bbox) if bbox is not None else None, dumps(locator), self.clock()))
             # Re-running enrichment must not remove historical passages: a
             # QuestionSourceLink may still cite a trailing row.
             self.conn.execute("DELETE FROM SourcePassageFTS WHERE source_artifact_id=?", (artifact_id,))
@@ -820,30 +873,66 @@ class Store:
         )
         return [dict(row) for row in rows]
 
-    def search_sources(self, query):
-        """Search passages with trigram FTS for 3+ chars and LIKE otherwise."""
-        query = query if isinstance(query, str) else ""
-        query = query.strip()
+    def retrieve(self, query, primary_subject=None, related_subjects=None, limit=8):
+        """Single FTS/LIKE retriever used by search, resolve and answering."""
+        import re
+        query = as_text(query).strip()
         if not query:
             return []
-        if len(query) >= 3:
+        primary_subject = primary_subject if primary_subject in SUBJECT_KEYS else None
+        related = [s for s in as_list(related_subjects) if s in SUBJECT_KEYS and s != primary_subject]
+        terms = re.findall(r"[A-Za-z0-9_]+|[\u4e00-\u9fff]{2,}", query)
+        chunks = []
+        for term in terms:
+            if re.fullmatch(r"[\u4e00-\u9fff]+", term):
+                chunks.extend(term[i:i + 3] for i in range(max(1, len(term) - 2)))
+            else:
+                chunks.append(term)
+        chunks = list(dict.fromkeys(chunks))[:24]
+        rows = []
+        if chunks:
+            match = " OR ".join('"' + token.replace('"', '""') + '"' for token in chunks)
             try:
-                match = '"' + query.replace('"', '""') + '"'
                 rows = self.all(
-                    "SELECT p.source_passage_id,p.source_artifact_id,p.text,p.page_no,p.bbox,p.locator_json "
+                    "SELECT p.source_passage_id,p.source_artifact_id,p.text,p.page_no,p.bbox,p.locator_json,a.source_name,a.subject_key,bm25(SourcePassageFTS) AS score "
                     "FROM SourcePassage p JOIN SourcePassageFTS f ON f.source_passage_id=p.source_passage_id "
-                    "WHERE SourcePassageFTS MATCH ? ORDER BY p.source_artifact_id,p.ordinal,p.source_passage_id",
-                    (match,),
+                    "JOIN SourceArtifact a ON a.source_artifact_id=p.source_artifact_id WHERE SourcePassageFTS MATCH ? ORDER BY score LIMIT ?",
+                    (match, max(limit * 6, 24)),
                 )
             except sqlite3.OperationalError:
                 rows = []
-        else:
+        if not rows or len(query) < 3:
+            like_terms = []
+            for term in terms:
+                if re.fullmatch(r"[\u4e00-\u9fff]+", term):
+                    like_terms.extend(term[i:i + 2] for i in range(max(1, len(term) - 1)))
+                elif len(term) >= 2:
+                    like_terms.append(term)
+            like_terms = list(dict.fromkeys(like_terms + [query]))[:12]
+            clauses = " OR ".join("COALESCE(p.text,'') LIKE ?" for _ in like_terms) or "COALESCE(p.text,'') LIKE ?"
             rows = self.all(
-                "SELECT source_passage_id,source_artifact_id,text,page_no,bbox,locator_json "
-                "FROM SourcePassage WHERE COALESCE(text,'') LIKE ? ORDER BY source_artifact_id,ordinal,source_passage_id",
-                (f"%{query}%",),
+                "SELECT p.source_passage_id,p.source_artifact_id,p.text,p.page_no,p.bbox,p.locator_json,a.source_name,a.subject_key,NULL AS score "
+                f"FROM SourcePassage p JOIN SourceArtifact a ON a.source_artifact_id=p.source_artifact_id WHERE {clauses} ORDER BY p.source_artifact_id,p.ordinal",
+                tuple(f"%{term}%" for term in (like_terms or [query])),
             )
-        return [dict(row) for row in rows]
+        allowed = {primary_subject, None, *related} if primary_subject else None
+        result, seen = [], set()
+        for row in rows:
+            item = dict(row); subject = item.get("subject_key")
+            if allowed is not None and subject not in allowed:
+                continue
+            item["locator"] = loads(item.get("locator_json"), {}) or item.get("locator_json")
+            item["score"] = item.get("score")
+            item["_subject_rank"] = 0 if primary_subject and subject == primary_subject else 1 if subject is None else 2
+            key = item.get("source_passage_id")
+            if key in seen:
+                continue
+            seen.add(key); result.append(item)
+        result.sort(key=lambda item: (item.pop("_subject_rank", 1), item.get("score") is None, item.get("score") if item.get("score") is not None else 0, item.get("source_artifact_id") or ""))
+        return result[:max(1, int(limit))]
+
+    def search_sources(self, query):
+        return self.retrieve(query)
 
     def _llm_chat(self, messages):
         base_url = os.environ.get("LLM_BASE_URL", "").strip()
@@ -947,6 +1036,15 @@ class Store:
             body = loads(response.read(), {})
         return self._provider_text(body, protocol)
 
+    def _invoke_with_fallback(self, prompt, image_parts):
+        errors = []
+        for label, config in (("LLM", self._provider_config("LLM")), ("LLM_FALLBACK", self._provider_config("LLM_FALLBACK"))):
+            try:
+                return self._call_provider(*config, prompt, image_parts), label, errors
+            except Exception as error:
+                errors.append(f"{label}: {error}")
+        return "", None, errors
+
     def _extract_analysis(self, raw, subject_hint=None):
         import re
         fields = {"question_text":"", "reference_answer":"", "subject_key": subject_hint if subject_hint in SUBJECT_KEYS else None, "chapter":"", "knowledge_point":"", "question_type":"", "error_reason":"", "error_breakpoint":"", "correct_approach":""}
@@ -1021,15 +1119,7 @@ class Store:
             return self._intake_detail(intake_id)
         if not any(a["role"] == "reference" for a in assets): prompt_lines.append("没有标准答案图片，请根据题面和我的解题过程推导答案，并把推导结果标为模型答案。")
         prompt = "\n".join(prompt_lines)
-        attempts = [("LLM", self._provider_config("LLM")), ("LLM_FALLBACK", self._provider_config("LLM_FALLBACK"))]
-        errors = []
-        raw = ""
-        for label, config in attempts:
-            try:
-                raw = self._call_provider(*config, prompt, image_parts)
-                break
-            except Exception as error:
-                errors.append(f"{label}: {error}")
+        raw, provider_label, errors = self._invoke_with_fallback(prompt, image_parts)
         self.begin()
         try:
             if raw:
@@ -1049,6 +1139,41 @@ class Store:
                     draft.update({"raw_analysis": raw, "analysis_status": "draft", "analysis_error": ""})
             else:
                 draft.update({"analysis_status":"failed", "analysis_error":"；".join(errors)[:500] or "provider unavailable"})
+            self.conn.execute("UPDATE IntakeItem SET draft_fields=?,updated_at=? WHERE intake_id=?", (dumps(draft), self.clock(), intake_id)); self.commit()
+        except Exception:
+            self.rollback(); raise
+        # Feed the coarse question understanding into the shared retriever,
+        # then optionally ask the same model to re-check its draft against
+        # real, server-resolved passages.
+        query_text = as_text(draft.get("question_text")).strip() or as_text(draft.get("raw_analysis")).strip()
+        related = []
+        primary_subject = draft.get("subject_key") if draft.get("subject_key") in SUBJECT_KEYS else row["subject_key"]
+        retrieved = self.retrieve(query_text, primary_subject=primary_subject, related_subjects=related, limit=8) if query_text else []
+        source_refs = [{"source_passage_id": item.get("source_passage_id"), "source_artifact_id": item.get("source_artifact_id"), "source_name": item.get("source_name"), "page_no": item.get("page_no"), "bbox": item.get("bbox"), "locator": item.get("locator")} for item in retrieved]
+        context = "\n\n".join(f"[S{index}] {item.get('source_name') or item.get('source_artifact_id') or '资料'} / 第{item.get('page_no') or '--'}页 / {item.get('locator') or '--'}\n{item.get('text') or ''}" for index, item in enumerate(retrieved, 1))
+        draft.update({"retrieval_status": "ready" if retrieved else "empty", "retrieved_context": context, "source_refs": source_refs, "grounding_label": "有资料依据" if retrieved else "未定位资料"})
+        second_raw = ""
+        second_errors = []
+        if retrieved:
+            second_prompt = "\n".join([
+                "请基于原始题目图片和以下资料候选，输出可编辑的错题分析草稿。先区分题面、我的解题步骤、标准答案/模型答案；逐步还原过程并指出首次偏离步骤。",
+                "给出错误原因、正确思路和科目/章节/知识点/题型候选。不确定内容标记‘待确认’，不要凭空制造出处或为了填满字段而猜测。资料编号只能作为参考。",
+                "资料候选：", context,
+            ])
+            second_raw, _second_provider, second_errors = self._invoke_with_fallback(second_prompt, image_parts)
+        if second_raw:
+            try:
+                fields = self._extract_analysis(second_raw, primary_subject)
+                for key, value in fields.items():
+                    if value not in (None, "") and not draft.get(key):
+                        draft[key] = value
+                draft.update({"raw_analysis": second_raw, "analysis_status": "draft", "analysis_error": "", "grounding_label": "有资料依据"})
+            except Exception as error:
+                draft.update({"analysis_status": "failed", "analysis_error": f"资料复核解析失败：{error}"})
+        elif retrieved and second_errors:
+            draft.update({"analysis_status": "failed", "analysis_error": "；".join(second_errors)[:500], "grounding_label": "模型不可用"})
+        self.begin()
+        try:
             self.conn.execute("UPDATE IntakeItem SET draft_fields=?,updated_at=? WHERE intake_id=?", (dumps(draft), self.clock(), intake_id)); self.commit()
         except Exception:
             self.rollback(); raise
@@ -1076,8 +1201,7 @@ class Store:
         query = as_text(draft.get("question_text")).strip() or as_text(draft.get("raw_analysis")).strip()
         candidates, seen = [], set()
         if query:
-            terms = [part.strip() for part in query.replace("\n", " ").split() if len(part.strip()) >= 2][:8]
-            fts_rows = self.search_sources(query[:120])
+            fts_rows = self.retrieve(query[:120], primary_subject=draft.get("subject_key") if draft.get("subject_key") in SUBJECT_KEYS else row["subject_key"], limit=8)
             for item in fts_rows[:8]:
                 key = item.get("source_passage_id")
                 if key in seen: continue
@@ -1557,6 +1681,7 @@ class Store:
         query = query.strip()
         question_id = None
         question_text = ""
+        primary_subject = None
         linked = []
         if requested_question_id:
             question = self.one("SELECT * FROM Question WHERE question_id=?", (requested_question_id,))
@@ -1566,6 +1691,8 @@ class Store:
                 prompt = self.one("SELECT * FROM ReviewPromptRevision WHERE review_prompt_revision_id=?", (revision["current_review_prompt_revision_id"],)) if revision else None
                 presentation = self._presentation(loads(prompt["presentation_snapshot"], {})) if prompt else {}
                 question_text = "\n".join(as_text(as_dict(block).get("content")) for block in as_list(presentation.get("blocks")))
+                grading = as_dict(loads(revision["grading_reference_fixture_snapshot"], {})) if revision else {}
+                primary_subject = grading.get("subject_key") if grading.get("subject_key") in SUBJECT_KEYS else None
                 linked = self.get_question_sources(question_id)
 
         selected = []
@@ -1575,7 +1702,7 @@ class Store:
             if passage_id and passage_id not in seen:
                 seen.add(passage_id)
                 selected.append(dict(row))
-        for row in self.search_sources(query):
+        for row in self.retrieve(query, primary_subject=primary_subject):
             passage_id = row.get("source_passage_id")
             if passage_id and passage_id not in seen:
                 seen.add(passage_id)
@@ -2207,6 +2334,8 @@ class Handler(BaseHTTPRequestHandler):
             payload = self._request_payload()
             if isinstance(payload, tuple):
                 values, files = payload
+                if path == "/api/capture/source":
+                    return self._json(200, {"data": self.store.capture_source(values, files)})
                 if path == "/api/intake/batches":
                     return self._json(200, {"data": self.store.create_intake_batch(files, values.get("subject_key") or None)})
                 if path.startswith("/api/wrong-questions/") and path.endswith("/redo"):
