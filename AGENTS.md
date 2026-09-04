@@ -14,7 +14,7 @@
 ## 协作规则
 
 - `main` 只接受 Pull Request，不直接在 `main` 上开发。
-- 除 `main` 外始终只保留一个现役开发分支；当前 canonical 分支为 `codex/f5-review-queue`，合并后由下一条唯一开发分支替换。未经用户明确要求，不创建并行功能分支。
+- 除 `main` 外始终只保留一个现役开发分支；当前 canonical 分支为 `mzy`，合并后由下一条唯一开发分支替换。未经用户明确要求，不创建并行功能分支或恢复旧分支。
 - 一个任务尽量由一个 Codex 负责；不要让两个 Codex 同时改同一批文件。
 - 开始工作前先同步主分支：`git switch main && git pull origin main`。
 - 提交保持小而明确，提交信息使用 `feat:`、`fix:`、`refactor:`、`docs:` 等前缀。
