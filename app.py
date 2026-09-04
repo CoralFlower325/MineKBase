@@ -980,9 +980,9 @@ class Store:
         row = self.one("SELECT protocol,base_url,api_key,model,updated_at FROM ModelEndpoint WHERE slot=?", (slot,))
         if row:
             protocol = row["protocol"] if row["protocol"] is not None else env_protocol
-            base_url = row["base_url"] if row["base_url"] is not None else env_base
+            base_url = row["base_url"] or env_base
             api_key = row["api_key"] if row["api_key"] else env_key
-            model = row["model"] if row["model"] is not None else env_model
+            model = row["model"] or env_model
             updated_at = row["updated_at"]
             configured = bool(api_key)
         else:
@@ -1028,7 +1028,7 @@ class Store:
                 self.conn.execute(
                     "INSERT INTO ModelEndpoint(slot,protocol,base_url,api_key,model,updated_at) VALUES(?,?,?,?,?,?) "
                     "ON CONFLICT(slot) DO UPDATE SET protocol=excluded.protocol,base_url=excluded.base_url,api_key=excluded.api_key,model=excluded.model,updated_at=excluded.updated_at",
-                    (slot, protocol, base_url if base_url is not None else "", api_key, model if model is not None else "", updated),
+                    (slot, protocol, base_url or None, api_key, model or None, updated),
                 )
             self.commit()
         except Exception:
@@ -1204,9 +1204,9 @@ class Store:
         if not row:
             return env
         protocol = row["protocol"] if row["protocol"] is not None else env[0]
-        base_url = row["base_url"] if row["base_url"] is not None else env[1]
+        base_url = row["base_url"] or env[1]
         api_key = row["api_key"] if row["api_key"] else env[2]
-        model = row["model"] if row["model"] is not None else env[3]
+        model = row["model"] or env[3]
         return protocol or "openai_chat", base_url or "", api_key or "", model or ""
 
     def _provider_text(self, body, protocol):
