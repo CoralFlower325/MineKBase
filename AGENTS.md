@@ -14,9 +14,9 @@
 ## 协作规则
 
 - `main` 只接受 Pull Request，不直接在 `main` 上开发。
-- 除 `main` 外始终只保留一个现役开发分支；当前 canonical 分支为 `mzy`，合并后由下一条唯一开发分支替换。未经用户明确要求，不创建并行功能分支或恢复旧分支。
+- 除 `main` 外始终只保留一个现役开发分支；当前唯一现役分支 `mzy` 是用户的个人分支，当前尚无协作者分支。未经用户明确要求，不创建并行功能分支或恢复旧分支；若以后明确启用协作者分支，各自使用独立工作目录并通过 Pull Request 汇入 `main`，不把 `mzy` 当共享分支。
 - 一个任务尽量由一个 Codex 负责；不要让两个 Codex 同时改同一批文件。
-- 开始工作前先同步主分支：`git switch main && git pull origin main`。
+- 开始新一轮前在 `mzy` 上同步 `git pull --ff-only origin mzy`；准备进入 `main` 前先核查当前 diff 并运行相关定向验证，通过 Pull Request 合并，不直接推送 `main`。协作者分支按同样规则分别核查后提交 PR。
 - 提交保持小而明确，提交信息使用 `feat:`、`fix:`、`refactor:`、`docs:` 等前缀。
 - 修改与当前任务无关的文件前，先在 Pull Request 中说明原因。
 

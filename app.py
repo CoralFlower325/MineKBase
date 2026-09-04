@@ -111,7 +111,7 @@ class DomainError(Exception):
 
 
 class Store:
-    """The ten-table learning ledger and its small command surface."""
+    """The SQLite learning ledger and its small command surface."""
 
     def __init__(self, path=DB_PATH, clock=None):
         self.path = Path(path)

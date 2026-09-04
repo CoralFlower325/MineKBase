@@ -54,7 +54,7 @@ question_type     可空、可编辑
 ### 1.2 输入
 
 - 一次上传默认代表一张错题卡，可以包含一张或多张图片；保留上传顺序。
-- 图片角色可以是 question（题面）、my_process（自己的解题过程）、reference（可选标准答案）、redo_process（回测时的新过程）或 mixed（同一张图同时含题面和过程）。角色可由用户指定或修正；确认时没有 question/mixed 仍允许进入错题本并标记“待补题面”，不设置门禁；确认后可在错题详情补选题面、解题过程、参考答案和顺序，只同步当前 Question 的展示/ grading 资产引用，不改历史 Attempt。历史 Attempt 和已开始 ReviewSession 按各自快照中的 asset_id 保持原图及顺序，不受后续角色编辑影响。普通 intake 上传不会创建 `redo_process`，专用 redo 上传才会将新图写入 `redo_process` 并保存到回测草稿；旧数据中的 `redo_process` 可在错题详情改回普通角色。未指定时模型按整组图片上下文理解，自动角色建议/回写留作后续薄补丁；不要求先裁剪图片。标准答案可以在首次上传时提供，也可以稍后追加到同一 intake。没有标准答案时先保存到 intake，等待模型解答或用户补充。
+- 图片角色可以是 question（题面）、my_process（自己的解题过程）、reference（可选标准答案）、redo_process（回测时的新过程）或 mixed（同一张图同时含题面和过程）。图片先上传保存，角色随后可由用户指定或修正；确认时没有 question/mixed 仍允许进入错题本并标记“待补题面”，不设置门禁；确认后可在错题详情补选题面、解题过程、参考答案和顺序，只同步当前 Question 的展示/ grading 资产引用，不改历史 Attempt。历史 Attempt 和已开始 ReviewSession 按各自快照中的 asset_id 保持原图及顺序，不受后续角色编辑影响。普通 intake 上传不会创建 `redo_process`，专用 redo 上传才会将新图写入 `redo_process` 并保存到回测草稿；旧数据中的 `redo_process` 可在错题详情改回普通角色。未指定时模型按整组图片上下文理解，自动角色建议/回写留作后续薄补丁；不要求先裁剪图片。标准答案可以在首次上传时提供，也可以稍后追加到同一 intake。没有标准答案时先保存到 intake，等待模型解答或用户补充。
 - 教材、讲义、笔记作为资料输入，当前支持文字 PDF、扫描 PDF、DOCX、图片和普通静态网页 URL；动态登录、无限滚动网页后置。
 - 题库和答案库是可选资料源，不是系统前置条件。
 
@@ -68,7 +68,7 @@ question_type     可空、可编辑
 | --- | --- | --- |
 | 原始资产存储 | 保存每张原图/资料文件、顺序和角色 | 不把识别结果当原图替换 |
 | SQLite | 题目、作答、诊断、确认、回测和提醒等学习事实 | 不承担全文/向量索引的全部实现 |
-| 共享 RAG | 从教材、讲义、笔记和已确认错题召回证据与标签候选 | 不决定答案是否正式入库 |
+| 共享 RAG | 从教材、讲义、笔记的 `SourcePassage` 召回证据与标签候选；已确认题目由同一 intake 流程补做 SQLite 轻量匹配 | 不决定答案是否正式入库 |
 | 视觉/语言模型 | 读多图、整理题面、解题、比较过程、指出首次断点 | 不改写历史 Attempt，不伪造出处 |
 | 用户 | 修改并确认答案、分类、错误原因和断点 | 不需要先补齐所有字段 |
 | WebUI | 上传、预览、编辑、确认、回测和查看来源 | 不要求用户复制路径或手写 ID |
@@ -106,17 +106,19 @@ analyze(image_assets, retrieved_context)
 
 科目边界留在本项目适配层，不散落到某个 RAG 或模型供应商实现中。
 
-1. 默认只检索当前题目的科目；未分类资料保留在同科结果之后。
-2. 数学与专业课允许轻量跨学科：先召回主科目资料，再补充未分类资料，最后追加一个小窗口的另一命名空间教材/笔记候选，并在界面标记“跨学科参考”。跨学科资料不能改变题目的主科目。
+当前代码中，资料 `Retriever` 直接检索 `SourcePassage`；已确认题目在 `resolve_intake` 中用 SQLite `LIKE` 补召回，二者在同一候选流程合并，尚未共用同一物理索引。资料候选按主科目/允许的跨科范围过滤；题目 `LIKE` 候选当前只按已确认状态和文本片段召回，不再按科目过滤。
+
+1. 对资料默认只检索当前题目的科目；未分类资料保留在同科结果之后。已确认题目候选目前不套用这条科目过滤。
+2. 数学与专业课允许轻量跨学科：先召回主科目资料，再补充未分类资料，最后追加一个小窗口的另一命名空间教材/笔记候选，并在候选中显示来源科目。跨学科资料不能改变题目的主科目。
 3. 英语和政治不自动跨科检索；数学题按“数学 → 未分类 → 专业课”顺序补召回，专业课题按“专业课 → 未分类 → 数学”顺序补召回，不建立跨科关系表。
 4. 未指定科目时可以从四个命名空间产生分类候选；用户确认后再归入具体科目。
 5. 不建立跨科关系表或图数据库。需要多跳关系时，再把同一批 passage 接给一个 LightRAG sidecar；sidecar 的物理 workspace/集合不改变“一套 Retriever”的业务接口。
 
 ### 3.2 资料和个人错题的层次
 
-- 原始图片/文件默认保留，分析失败不会删除；用户可主动删除不需要的图片。
+- 原始图片/资料文件默认保留，分析失败不会删除；当前仅可从 intake 删除尚未锁定的图片资产，资料文件删除后置。
 - OCR、视觉转写、切片、向量和图关系都是可重建的派生物。
-- 教材/讲义/笔记 passage 提供出处；已确认错题的题面、诊断和重做记录可以作为个人检索材料。
+- 教材/讲义/笔记的 `SourcePassage` 提供出处；已确认题目当前通过 `resolve_intake` 的 SQLite 轻量匹配参与候选召回，尚未复制为资料 passage。
 - 未确认的模型答案和诊断只停留在 intake 草稿，不作为正式 RAG 事实。
 
 ## 4. 最小领域模型
@@ -131,11 +133,11 @@ analyze(image_assets, retrieved_context)
 | AnalysisCandidate | 题面、参考答案、四个分类字段、错误原因、首次断点、正确思路、来源 | 模型/RAG 产生的候选；来源可指向 asset/区域或 passage locator，所有字段可空、可编辑 |
 | WrongQuestion | wrong_question_id、已确认字段、原始资产引用 | 用户确认后的错题本卡片；参考答案、错误原因和首次断点按用户当前内容保存，可为空并显示“待补充”，确认后仍可补充，分类字段可以为空 |
 | Attempt | attempt_id、wrong_question_id、kind、response_text?、asset_ids、submitted_at | 初次作答或回测重做；永不覆盖历史 |
-| MaterialArtifact | artifact_id、kind、subject_key?、path/url、parse_state | 教材、讲义、笔记、网页等原始资料 |
-| Passage | passage_id、artifact_id、text、page/locator、subject_key、chapter?、knowledge_point?、question_type? | 资料的可回源派生片段，进入 FTS/向量索引；分类元数据可空 |
+| MaterialArtifact（实现：`SourceArtifact`） | `source_artifact_id`、kind、subject_key?、`stored_path?`、`raw_payload.source_url?`、parse_state | 教材、讲义、笔记、网页等原始资料；URL 在抓取前只有 `source_url`，`stored_path` 可为空 |
+| Passage（实现：`SourcePassage`） | `source_passage_id`、`source_artifact_id`、text、`page_no`、`bbox`、`locator_json` | 资料的可回源派生片段，当前进入 FTS；章节/知识点/题型是题目草稿候选，不是当前 passage 列 |
 | ReviewTask | task_id、wrong_question_id、round、due_at、status | 只表达下一次重做行动 |
 
-实现时可以复用现有的 Question、QuestionRevision、Attempt、ReviewTask 和 SourcePassage，但不要再让 SourceArtifact 的 image_path 字符串冒充图片上传系统。图片必须有真实文件和题目/Attempt 关系；旧 P0 的十张学习账本表不是新的产品边界。
+实现时可以复用现有的 Question、QuestionRevision、Attempt、ReviewTask 和 SourcePassage；资料使用 SourceArtifact/SourcePassage，题目图片使用 ImageAsset，不让资料路径字段冒充图片上传系统。图片必须有真实文件和题目/Attempt 关系；旧 P0 的学习账本表不是新的产品边界。
 
 ### 4.1 字段和事实规则
 
@@ -172,8 +174,8 @@ flowchart TD
 
 ### 5.1 匹配和模型解答
 
-1. 先由视觉模型从图片得到粗题面，再在已确认错题（其题面/答案可作为个人检索片段）、已导入题库/答案库和资料 passage 中检索相似题面。
-2. 有可用匹配时，界面同时显示匹配题目、出处和答案；用户仍可改正匹配。
+1. 先由视觉模型从图片得到粗题面，再在已确认题目的 SQLite 轻量匹配结果和资料 `SourcePassage` 中检索相似题面；题库/答案库没有独立前置接口，按普通题目或资料入口收录。
+2. 模型草稿可能已经提供答案；选择题目候选时可以填入或覆盖其答案，界面同时显示匹配题目、出处和答案候选，用户仍可改正匹配。
 3. 没有匹配时，模型根据原图和 RAG 资料生成解题草稿。没有资料也可以给出模型草稿，但明确标记“无资料依据”。
 4. 两条路径都使用同一套候选编辑和确认界面，不能让“数据库命中”绕过用户确认。
 
@@ -194,34 +196,32 @@ flowchart TD
 ~~~text
 原始资料保存
 → 解析为统一文本/区域片段
-→ passage 带 subject/chapter/knowledge_point/question_type/source locator
+→ `SourcePassage` 保留 text/page/bbox/locator（科目来自 `SourceArtifact`）
+→ 章节/知识点/题型先作为题目草稿中的可编辑候选
 → 写入 SQLite FTS5
 → 有真实需要再增加向量召回或 LightRAG
 ~~~
 
-文字 PDF 先用现有 pypdf；浏览器上传的 PDF/PNG/JPG/DOCX 或普通静态网页 URL 原文件先保存到 `objects/sources/`，文字层 PDF 继续按页解析，扫描/混合 PDF 的空文字页和资料图片在点击增强时懒加载单一 `ocr_adapter.py`（PaddleOCR 3.x），DOCX 懒加载 `python-docx` 提取段落和表格单元格，网页抓取优先使用可选 trafilatura、缺失时回退标准库 HTMLParser。所有结果仍输出同一种 Passage，尽量保留 page_no、bbox 和 locator_json（DOCX locator 至少含 parser、paragraph 或 table/row/cell；网页 locator 含 parser、url、ordinal）；OCR 不可用或网页抓取失败只标记 unavailable/error，原文件和资料记录保留可重试。OCR 只生成资料检索派生文本，不替代视觉模型对手写题面和过程的理解。网页仅支持静态抓取，不做登录、滚动或批量爬站。
+文字 PDF 先用现有 pypdf；浏览器上传的 PDF/PNG/JPG/DOCX 文件原件先保存到 `objects/sources/`，普通静态网页 URL 先写入 `SourceArtifact`，增强抓取成功后再保存 HTML 原件；文字层 PDF 继续按页解析，扫描 PDF 的空文字页和直接上传的资料图片在增强时懒加载单一 `ocr_adapter.py`（PaddleOCR；PDF 光栅化需要 `pypdfium2` 或 `fitz`），DOCX 懒加载 `python-docx` 提取段落和表格单元格，网页抓取优先使用可选 trafilatura、缺失时回退标准库 HTMLParser。所有结果仍输出同一种 `SourcePassage`，尽量保留 page_no、bbox 和 locator_json（DOCX locator 至少含 parser、paragraph 或 table/row/cell；网页 locator 含 parser、url、ordinal）；OCR 不可用或网页抓取失败只标记 unavailable/error，原文件和资料记录保留可重试。OCR 只生成资料检索派生文本，不替代视觉模型对手写题面和过程的理解。网页仅支持静态抓取，不做登录、滚动或批量爬站。
 
 ### 6.2 召回顺序
 
 ~~~text
 统一 `Store.retrieve(query, primary_subject, related_subjects?, limit=8)`
-→ 中文/英文片段 FTS5 召回（bm25 排序）
-→ 短查询 LIKE 兜底
-→ 当前科目过滤
-→ （可选）向量补召回
-→ （可选）数学/专业课轻量跨科补召回
-→ 去重后交给模型
+→ 按主科目/允许的跨科范围查询 FTS5 与 LIKE
+→ 合并、按科目优先级去重排序后交给模型
+→ （未来可选）在同一 Retriever 中补充向量召回
 ~~~
 
-RAG 返回的是证据片段和标签候选，不返回“已确认答案”。所有来源都要能回到资料文件、页码或图片资产；找不到来源时仍可显示模型回答，但标注未定位。
+RAG 返回的是证据片段和标签候选，不返回“已确认答案”。资料来源能回到资料文件、页码或 locator；题目匹配返回已确认 `question_id`，若该题有资产快照可再查看原图。找不到来源时仍可显示模型回答，但标注未定位。
 
-RAG 不直接写入权威标签：它把带有可空 subject/chapter/knowledge_point/question_type 的资料候选交给模型，模型结合题面和过程生成分类草稿，用户确认后才写入错题事实；没有标签的来源也可以召回并标为“未分类来源”。
+RAG 不直接写入权威标签：它把资料候选交给模型，模型结合题面和过程生成分类草稿，用户确认后才写入错题事实。当前资料候选只稳定提供科目（来自 `SourceArtifact`）；章节、知识点和题型仍是题目草稿中的可编辑候选，没有标签的来源也可以召回，并在候选中保留为空的科目状态。
 
 所谓知识网在首版只表现为 SQLite 元数据链：subject → chapter → knowledge_point（附可编辑别名）。它先服务于过滤、标签和回测统计；只有真实出现多跳需求时才考虑图检索，不提前建设图数据库。
 
 ## 7. 模型协议和失败处理
 
-协议和模型 ID 分开配置：
+协议和模型分开配置：
 
 | protocol | 用途 |
 | --- | --- |
@@ -229,7 +229,7 @@ RAG 不直接写入权威标签：它把带有可空 subject/chapter/knowledge_p
 | openai_responses | OpenAI Responses 形状，支持图像输入和响应内容 |
 | anthropic_messages | Anthropic Messages 形状，支持多图和文本 |
 
-每个配置另外保存 base_url、api_key、model_id；当前 WebUI 将 primary/fallback 两个槽位直接保存到本地 SQLite 的轻量模型端点表，读取时只返回 API key 是否已配置。调用顺序是主配置，再按用户设置的回退配置；回退仍不可用时只留下 IntakeItem 的失败状态和原图，不产生正式答案、诊断或 ReviewTask。不要要求所有供应商返回同一 JSON，也不把供应商错误变成启动失败。
+每个配置另外保存 base_url、api_key、model；当前 WebUI 将 primary/fallback 两个槽位直接保存到本地 SQLite 的轻量模型端点表，读取时只返回 API key 是否已配置。主配置和回退配置都可以留空；图片 intake 分析调用时按主配置、回退配置依次尝试，均未配置或失败时只留下 IntakeItem 的失败状态和原图，不产生未经确认的正式答案、诊断或 ReviewTask。`/api/answer` 会保留 `unavailable` 的回答结果，回测比较失败会保留已提交 Attempt；二者都不阻断保存。不要要求所有供应商返回同一 JSON，也不把供应商错误变成启动失败。
 
 ## 8. 回测和提醒
 
@@ -301,7 +301,7 @@ GET   /api/reviews/due                   # 到期题面和日期
 
 ### B. 一题分析草稿（已完成）
 
-已把多图送入统一的分析入口，接入现有云端模型配置、三种协议适配和回退。分析结果写入 `draft_fields`：`question_text`、`reference_answer`、`subject_key`、`chapter`、`knowledge_point`、`question_type`、`error_reason`、`error_breakpoint`、`correct_approach` 和 `raw_analysis`；普通文本/Markdown 也可解析，原始回答始终保留。重试只补充空白候选，不静默覆盖用户已编辑的字段。无可用模型时只保留/查看 intake，模型恢复后可重试。用户上传标准答案或手工补全只是候选来源；答案和诊断的确认属于 C 的用户动作，空字段也可继续确认并以“待补充”留在正式快照，不用技术门禁阻断上传、重试或入库。本阶段不接共享 RAG，C 阶段再加入资料召回。
+已把多图送入统一的分析入口，接入现有云端模型配置、三种协议适配和回退。分析结果写入 `draft_fields`：`question_text`、`reference_answer`、`subject_key`、`chapter`、`knowledge_point`、`question_type`、`error_reason`、`error_breakpoint`、`correct_approach` 和 `raw_analysis`；普通文本/Markdown 也可解析，原始回答始终保留。重试只补充空白候选，不静默覆盖用户已编辑的字段。无可用模型时只保留/查看 intake，模型恢复后可重试。用户上传标准答案或手工补全只是候选来源；答案和诊断的确认属于 C 的用户动作，空字段也可继续确认并以“待补充”留在正式快照，不用技术门禁阻断上传、重试或入库。B 只负责模型分析草稿；资料召回在 C 阶段接入。
 
 实现映射：`IntakeItem.state` 只表示原图保存完整性（`raw/saved/incomplete`），分析过程和结果放在 `draft_fields.analysis_status`（`analyzing/draft/failed`），不再增加另一张分析表或状态服务。
 
@@ -321,7 +321,7 @@ GET   /api/reviews/due                   # 到期题面和日期
 
 ### E2. 资料扩展（已接通最小闭环）
 
-文字 PDF、资料图片、DOCX 和普通静态网页已沿现有 SourceArtifact → SourcePassage → FTS 链路接通：原文件落盘，pypdf 按页解析，扫描/混合 PDF 空页和图片可选使用 PaddleOCR，DOCX 使用懒加载 python-docx 解析段落与表格并保留 locator，网页抓取优先 trafilatura、缺失时使用标准库 HTMLParser 并保留 URL locator；解析依赖或抓取失败时保留原文件并标记 unavailable，可重试。浏览器多文件上传后逐份自动增强，最近资料可从 `/api/sources` 查看，单份资料仍可重试。所有模型入口（回答、图片第一轮/资料复核）统一使用 WebUI 保存的 primary/fallback 配置，未保存时回退环境变量。图片题分析会复用现有 retrieve()，将真实 passage/page/locator 放入二次模型上下文；数学和专业课按主科、未分类、另一科的顺序做轻量补召回，英语和政治不跨科。当前仍是 FTS/LIKE 轻量召回，不是语义相似题 RAG 或知识图谱；网页动态登录、向量库、LightRAG、FSRS 继续后置。
+文字 PDF、资料图片、DOCX 和普通静态网页已沿现有 SourceArtifact → SourcePassage → FTS 链路接通：上传文件原件落盘，网页 URL 先记入 SourceArtifact、抓取成功后保存 HTML，pypdf 按页解析，扫描 PDF 的空文字页和直接上传的资料图片可选使用 PaddleOCR（PDF 光栅化需要 pypdfium2 或 fitz），DOCX 使用懒加载 python-docx 解析段落与表格并保留 locator，网页抓取优先 trafilatura、缺失时使用标准库 HTMLParser 并保留 URL locator；解析依赖或抓取失败时保留已上传原件/资料记录并标记 unavailable，可重试。浏览器多文件上传后逐份自动增强，最近资料可从 `/api/sources` 查看，单份资料仍可重试。所有模型入口（回答、图片第一轮/资料复核）统一使用 WebUI 保存的 primary/fallback 配置，未保存时回退环境变量。图片题分析会复用现有 retrieve()，将真实 passage/page/locator 放入二次模型上下文；数学和专业课按主科、未分类、另一科的顺序做轻量补召回，英语和政治不跨科。当前仍是 FTS/LIKE 轻量召回，不是语义相似题 RAG 或知识图谱；网页动态登录、向量库、LightRAG、FSRS 继续后置。
 
 ### F5. 回测队列收口（已完成）
 
@@ -342,17 +342,17 @@ GET   /api/reviews/due                   # 到期题面和日期
 | 项目 | 复用结论 | 何时引入 | 明确不吸收 |
 | --- | --- | --- | --- |
 | [py-pdf/pypdf](https://github.com/py-pdf/pypdf) | 已用于有文本层 PDF 的按页提取 | 现在继续用 | 图片理解、手写和复杂版面 |
-| [microsoft/markitdown](https://github.com/microsoft/markitdown) | 将 Word、Office、HTML 等资料转为统一 Markdown/文本，接入 MaterialArtifact → Passage | 复杂 Office/HTML 版面真实出现时再评估 | 不负责题目图片和解题诊断 |
+| [microsoft/markitdown](https://github.com/microsoft/markitdown) | 将 Word、Office、HTML 等资料转为统一 Markdown/文本，接入 `SourceArtifact` → `SourcePassage` | 复杂 Office/HTML 版面真实出现时再评估 | 不负责题目图片和解题诊断 |
 | [adbar/trafilatura](https://github.com/adbar/trafilatura) | 网页正文和元数据抽取，作为网页资料的可选增强 | 现在作为网页正文优先解析器（缺失时回退标准库） | 不负责题目图片和学习事实 |
 | [docling-project/docling](https://github.com/docling-project/docling) | 复杂 PDF/Office/表格/版面统一解析，可作为资料旁路 | 扫描或版面错乱成为实际问题时 | 不与现有解析器同时常驻、不替代原图 |
 | [opendatalab/MinerU](https://github.com/opendatalab/MinerU) | 扫描 PDF、公式、表格和图片的高保真解析备选 | Docling 不够且真实资料证明需要时二选一；先审许可证 | 不与 Docling/Pix2Text/PaddleOCR 全部并行 |
-| [HKUDS/LightRAG](https://github.com/HKUDS/LightRAG) | 唯一可选的图/向量 RAG sidecar；当前上游已吸收 RAG-Anything 的多模态方向 | 出现多跳/跨章节需求时 | 不拥有 SQLite 学习事实，不与另一套图 RAG 并行 |
+| [HKUDS/LightRAG](https://github.com/HKUDS/LightRAG) | 唯一可选的图/向量 RAG sidecar | 出现多跳/跨章节需求时 | 不拥有 SQLite 学习事实，不与另一套图 RAG 并行 |
 | [HKUDS/RAG-Anything](https://github.com/HKUDS/RAG-Anything) | 作为 LightRAG 多模态能力的历史来源/兼容参考 | 仅在需要核对旧部署时 | 不再单独维护第二套服务 |
 | [asg017/sqlite-vec](https://github.com/asg017/sqlite-vec) | SQLite 内的语义召回旁路，可保留元数据分区 | FTS 对相似题召回确实不足时 | 不提前引入独立向量数据库；其 pre-v1 状态需接受 |
-| [breezedeus/Pix2Text](https://github.com/breezedeus/Pix2Text) | 中文、公式和版面 OCR 的本地派生文本 | 扫描教材需要本地 OCR 时择用 | 不把 OCR 当手写解题理解主路径 |
-| [PaddlePaddle/PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR) | 更重的中文/公式/文档 OCR 备选 | 需要批量 OCR 或 Pix2Text 不够时二选一 | 不与 Pix2Text 同时作为默认依赖 |
-| [openai/openai-python](https://github.com/openai/openai-python) | OpenAI Chat/Responses 协议调用的官方 SDK 参考 | B 阶段实现协议适配时，可选替换现有 urllib | 不把 SDK 当模型路由或业务事实库 |
-| [anthropics/anthropic-sdk-python](https://github.com/anthropics/anthropic-sdk-python) | Anthropic Messages 协议调用的官方 SDK 参考 | B 阶段实现协议适配时 | 不把 SDK 当统一 RAG 或答案确认器 |
+| [breezedeus/Pix2Text](https://github.com/breezedeus/Pix2Text) | 中文、公式和版面 OCR 的本地派生文本备选；当前未接入 | PaddleOCR 对真实扫描资料不足时再择用 | 不把 OCR 当手写解题理解主路径 |
+| [PaddlePaddle/PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR) | 当前资料 OCR 的可选、懒加载适配器 | 现在继续按需使用；依赖缺失时保留原件并标记 unavailable | 不与 Pix2Text 同时作为默认依赖 |
+| [openai/openai-python](https://github.com/openai/openai-python) | OpenAI Chat/Responses 协议调用的官方 SDK 参考 | 当前协议适配已用 urllib；后续若 SDK 管理成本成为真实问题再评估 | 不把 SDK 当模型路由或业务事实库 |
+| [anthropics/anthropic-sdk-python](https://github.com/anthropics/anthropic-sdk-python) | Anthropic Messages 协议调用的官方 SDK 参考 | 当前协议适配已用 urllib；后续若 SDK 管理成本成为真实问题再评估 | 不把 SDK 当统一 RAG 或答案确认器 |
 | [Blaizzy/mlx-vlm](https://github.com/Blaizzy/mlx-vlm) | Mac 本地视觉模型回退的可选参考 | 云端模型不可用且确有本地需求时 | 不替代首版云端协议适配 |
 | [open-spaced-repetition/py-fsrs](https://github.com/open-spaced-repetition/py-fsrs) | 后续个性化间隔算法 | 有真实回测数据后 | 当前固定 3/7/10/14 天不引入 |
 
@@ -364,7 +364,7 @@ GET   /api/reviews/due                   # 到期题面和日期
 
 - 本地 SQLite 学习账本和 API/fixture 级文字回测演示链；
 - 文字/PDF 文本层收录、按页 passage、FTS5、手动出处关联；
-- 可选 OpenAI-compatible 文本 Chat 回答；
+- 可选三协议文本/多图模型调用（OpenAI Chat、OpenAI Responses、Anthropic Messages）；
 - 图片收录底座：multipart 多图上传、objects/ 原图落盘、CaptureBatch/IntakeItem/ImageAsset、预览、追加、排序、角色编辑和媒体读取；
 - 一题分析草稿：多图视觉请求、`openai_chat`/`openai_responses`/`anthropic_messages` 适配与回退、可编辑候选字段、原始回答保留和失败重试；
 - C 主链：轻量 FTS/已确认题目候选、确认晋级、QuestionSourceLink 出处回链、题面/过程图片快照隔离、正式错题列表/详情和首个 +3 天任务；
