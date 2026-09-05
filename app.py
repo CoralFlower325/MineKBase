@@ -2547,7 +2547,7 @@ class Store:
         non-empty filter value.
         """
         filters = {key: as_text(value).strip() for key, value in as_dict(filters).items()
-                   if key in {"course_id", "subject_key", "chapter", "knowledge_point", "question_type"}
+                   if key in {"course_id", "subject_key", "chapter", "knowledge_point", "question_type", "error_type"}
                    and as_text(value).strip()}
         rows = self.all("SELECT q.question_id FROM Question q JOIN QuestionRevision qr ON qr.question_revision_id=q.current_question_revision_id WHERE qr.revision_state='confirmed' AND qr.grading_reference_fixture_snapshot LIKE '%intake_id%'")
         result = []
@@ -3738,7 +3738,7 @@ class Handler(BaseHTTPRequestHandler):
                 query = parse_qs(urlparse(self.path).query, keep_blank_values=True)
                 question_ids = query.get("question_id", [])
                 include_answers = query.get("answers", ["1"])[0] not in {"0", "false", "no"}
-                filter_keys = {"course_id", "subject_key", "chapter", "knowledge_point", "question_type"}
+                filter_keys = {"course_id", "subject_key", "chapter", "knowledge_point", "question_type", "error_type"}
                 filters = {key: values[0] for key, values in query.items() if key in filter_keys and values and values[0]}
                 return self._text(200, self.store.export_wrong_questions(question_ids, include_answers, filters), "text/markdown; charset=utf-8")
             if path == "/api/north-star":

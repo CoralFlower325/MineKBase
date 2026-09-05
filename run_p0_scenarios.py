@@ -446,7 +446,7 @@ def run_wrong_course_filter_smoke():
                     "analysis_status": "draft",
                     "question_text": f"课程隔离测试题 {index}",
                     "reference_answer": "参考解",
-                    "error_type": "knowledge_gap",
+                    "error_type": "method_selection" if index == 1 else "knowledge_gap",
                     "error_reason": "概念混淆",
                     "chapter": "测试章节",
                     "knowledge_point": "测试知识点",
@@ -464,14 +464,18 @@ def run_wrong_course_filter_smoke():
             assert question_candidates and all(item.get("grading", {}).get("course_id") in {None, courses[0]["course_id"]} for item in question_candidates)
             all_rows = store.list_wrong_questions()
             filtered = store.list_wrong_questions({"course_id": courses[0]["course_id"]})
+            type_filtered = store.list_wrong_questions({"error_type": "method_selection"})
             assert len(all_rows) == 2 and len(filtered) == 1
+            assert len(type_filtered) == 1 and type_filtered[0]["course_id"] == courses[0]["course_id"]
             assert filtered[0]["course_id"] == courses[0]["course_id"]
             assert filtered[0]["question_text"] == "课程隔离测试题 1"
             exported = store.export_wrong_questions(include_answers=False)
             assert "- 课程：信号与系统（电子类考研）" in exported
             assert "- 课程：数字电路（电子类考研）" in exported
             scoped_export = store.export_wrong_questions(include_answers=False, filters={"course_id": courses[0]["course_id"]})
+            type_export = store.export_wrong_questions(include_answers=True, filters={"error_type": "method_selection"})
             assert "课程隔离测试题 1" in scoped_export and "课程隔离测试题 2" not in scoped_export
+            assert "课程隔离测试题 1" in type_export and "课程隔离测试题 2" not in type_export
             navigation = store.knowledge_navigation()
             assert len(navigation["subjects"]) == 2
             assert {item["course_id"] for item in navigation["subjects"]} == {course["course_id"] for course in courses}
