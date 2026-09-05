@@ -1,95 +1,317 @@
-# 考研知识库 × 错题本
+# 知债 · 考研错题工作台
 
-> 目标架构已重构为“图片优先错题本 × 共享 RAG”，以 [design.md](design.md) 为唯一目标基线。本 README 下面的接口和命令仍是过渡底座说明；图片收录、B 阶段分析草稿以及 C 阶段的候选/确认主链已实现，回测图片闭环仍在后续阶段。
+本地优先、单用户的图片错题本与课程知识工作台。
 
-一个单用户、本地优先的学习系统：资料和题目先保存，解析、检索和模型增强随后进行；错误变成下一次回测任务，作答和评价形成个人学习轨迹。
+> **当前状态**：可运行的个人版。主链已经落地：一题多图保存、分析草稿、用户确认、课程知识树、闭卷回测、题库导入和政治客观题。真实手写照片上的公式识别、首次错误步骤定位和模型诊断质量仍需持续用真实资料验证。
+>
+> **产品边界**：固定四个科目类别——政治、英语、数学、专业课。具体考试方向、院校和专业课组合都由用户创建或导入，不写入前端页面契约或后端业务分支。
 
-## 当前可以做什么
+## Overview
 
-- 用 SQLite 保存课程、学习目标、题目版本、回测任务、会话、Attempt、Assessment 和 EvidenceEvent。
-- 通过本地 Web API 或首页完成：建立/查看任务、开始回测、自动保存草稿、查看提示、提交作答、补充评价。
-- 保存每次作答和帮助事件；评价不完整时记录为 `unassessed`，后续仍可继续补充。
-- 用 SQL 投影显示今日任务、学习目标状态和北极星事件。
-- 无需模型、OCR、RAG 或额外服务即可运行 P0 演示链。
-- 可把搜索到的资料 passage 手动关联到题目，并在题目详情中查看出处定位。
-- 可通过 `enrich` 按页提取有文本层的 PDF，并保留页码定位。
-- 可用 `/api/answer` 基于题面、已关联出处和 FTS 命中生成普通文本回答；回答会保存到本地 SQLite，并由服务端返回真实 passage 出处。
-- 图片 intake 已支持多图视觉分析草稿、三种模型协议、回退、字段编辑和失败重试；分析失败时原图仍保留，不会自动生成正式错题。
-- 图片 intake 已支持基于现有 FTS/已确认题目的轻量候选召回，以及确认后创建正式 Question/Attempt/ReviewTask；确认后的出处回链、正式错题列表/详情和题面图片过滤已经接通，真实图片回测仍待实现。
-- 资料与回答接入保持四件薄对象：`SourceArtifact`、`SourcePassage`、`QuestionSourceLink`、`Answer`；回答状态 `grounded/unlocated/unavailable` 是结果状态，不是流程门禁。
+知债把“做错一道题”整理成一条可复核的记录：
 
-## 启动
+```text
+拍照上传一道题的多张图片
+    ↓
+原图先保存
+    ↓
+识别题面、我的过程、参考答案
+    ↓
+生成章节 / 知识点 / 题型 / 错误诊断候选
+    ↓
+用户修改并确认
+    ↓
+进入正式错题本和个人知识树
+    ↓
+到期只看题面，选择会 / 不会 / 不确定
+    ↓
+需要时上传新的完整过程并回测
+```
 
-双击 `start.command`（或在终端执行 `./start.command`）会启动/复用本地服务，并自动打开默认浏览器。
+模型、OCR、资料检索和题库都只提供候选或证据。增强失败不会删除原始输入，也不会绕过用户确认直接写入正式错题字段。
+
+## Highlights
+
+- **四科通用模型**：政治、英语、数学、专业课是固定类别；`course_id` 表示用户真正使用的课程。
+- **图片优先收录**：一题可以上传多张题面、解题过程和参考解图片，原图按顺序保留。
+- **可编辑分析草稿**：题面、答案、章节、知识点、题型、错误类型、错误原因和首次出错步骤都可以人工修正。
+- **确认后入档**：只有确认后的题目才进入正式错题本、个人知识树和回测队列。
+- **闭卷回测**：回测接口只返回题面和当前草稿；历史答案、过程图和诊断在闭卷阶段不可见。
+- **课程隔离**：题目、资料、题库、知识节点和回测都沿用同一个 `course_id` 边界。
+- **资料先存后增强**：支持 PDF、PNG/JPG、DOCX、普通静态网页和短文本；解析失败时原件仍然保留。
+- **题库导入**：CSV / JSON 先预览校验，再确认写入；已有题库可按课程、章节、题型和难度筛选。
+- **政治选择题**：政治题库使用独立客观题流程，不进入数学和专业课的图片诊断主链。
+- **独立设置页**：模型连接设置与知识区分离，模型不可用时不阻塞图片保存和草稿编辑。
+- **本地事实源**：SQLite 保存学习事实，`objects/` 保存原始图片和资料，不需要云端服务。
+
+## Requirements
+
+- Python 3
+- macOS（`start.command` 和到期通知使用 macOS 工具；Linux/Windows 可直接运行 Python 服务）
+- 不需要 Node.js、前端构建工具或独立数据库服务
+- 使用模型增强时，需要一个兼容已选协议的本地或远程模型端点；不配置模型也能完成保存、编辑和确认
+
+## Quick start
+
+### Start the local Web UI
 
 ```bash
+./start.command
+```
+
+脚本会创建演示数据库（如果本地还没有 `library.sqlite`），启动 `127.0.0.1:8765`，然后打开默认浏览器。
+
+手动启动：
+
+```bash
+# 可选：建立演示数据
 python3 app.py seed --as-of 2026-09-01T00:00:00Z
+
+# 启动本地服务
 python3 app.py serve
 ```
 
-首次启动会使用 `fixtures/p0_fixture_manifest.json` 建立一条演示题目；再次运行 `seed` 会复用已有事实，不覆盖数据。需要重置演示库时，显式指定临时数据库：
+打开 <http://127.0.0.1:8765/>。
+
+### Use a disposable demo database
 
 ```bash
 python3 app.py --db /tmp/knowledge-demo.sqlite seed --force --as-of 2026-09-01T00:00:00Z
+python3 app.py --db /tmp/knowledge-demo.sqlite serve
 ```
 
-浏览器打开 <http://127.0.0.1:8765/>。
+`library.sqlite`、`objects/` 和本地模型 API key 不提交到 Git，也不会被演示数据命令覆盖。
 
-## 真实收录
+## The current Web UI
 
-首页“收录题目”和“收录资料”表单会立即把输入写入当前 `library.sqlite`，并提示“已保存，等待增强”。也可以直接调用：
+前端由五个独立视图组成：**今日、复习、收录、知识、设置**。视图通过 hash 路由切换，当前视图之外的模块不会继续堆叠在同一长页面中。
+
+### 今日
+
+- 查看最早到期的回测任务；
+- 查看待回测、已确认错题和课程数量；
+- 从课程卡片切换当前课程；
+- 进入复习或收录新题。
+
+### 复习
+
+- 查看全部到期任务；
+- 按课程和错误类型筛选正式错题；
+- 进入闭卷回测，选择“会 / 不会 / 不确定”；
+- 可上传新的文字过程或一张/多张回测过程图片；
+- 保存新的 Attempt，不覆盖历史 Attempt。
+
+### 收录
+
+- 上传一题的多张图片，原图先落盘；
+- 选择课程和科目类别，后续调整图片角色；
+- 运行图片分析和资料匹配；
+- 编辑分析草稿，确认后进入正式错题本；
+- 保存教材、讲义、网页 URL 或短文本，并尝试自动增强。
+
+### 知识
+
+- 按课程查看知识树和已确认题目；
+- 查看和筛选当前课程题库；
+- 预览并导入 CSV / JSON 题库；
+- 进入政治客观题刷题入口。
+
+### 设置
+
+模型设置是独立页面，不属于知识区。可以配置主模型、回退模型、协议、地址、模型名和 API key。API key 只存本地 SQLite，读取接口只返回是否已配置。
+
+## Subject and course model
+
+系统固定四个 `subject_key`：
+
+| `subject_key` | 中文类别 | 当前状态 |
+| --- | --- | --- |
+| `politics` | 政治 | 客观题库和判题已接入 |
+| `english` | 英语 | 保留科目槽位，具体题型后置 |
+| `math` | 数学 | 图片错题主链和题库接口已接入 |
+| `professional` | 专业课 | 支持多个用户自定义课程 |
+
+具体课程由 `Course` 表保存：
+
+```text
+科目类别：subject_key
+具体课程：course_id + course_name + course_group
+题目 / 资料 / 题库 / 知识节点：必须关联 course_id
+```
+
+示例中的课程名称只是用户数据，不是产品代码分支。创建课程：
 
 ```bash
-curl -X POST http://127.0.0.1:8765/api/capture/question \
+curl -X POST http://127.0.0.1:8765/api/courses \
   -H 'Content-Type: application/json' \
-  -d '{"question_text":"题面原文","response_text":"我的作答"}'
-curl -X POST http://127.0.0.1:8765/api/capture/source \
-  -H 'Content-Type: application/json' \
-  -d '{"source_name":"笔记","raw_text":"第一段\n\n第二段"}'
+  -d '{"course_group":"我的考试方向","course_name":"专业课组合","subject_key":"professional"}'
 ```
 
-资料收录返回 `source_artifact_id` 后，可按需执行一次本地文本/PDF 文本层增强：
+## Architecture
 
-```bash
-python3 app.py enrich --artifact-id <id>
+```text
+Browser
+  ├── index.html       页面壳层和五个视图
+  ├── frontend.css     视觉令牌、布局和响应式规则
+  └── frontend.js      hash 路由、状态和 API 适配
+
+Python HTTP service
+  ├── app.py            Store、领域流程和本地 API
+  ├── schema.sql        SQLite 结构
+  └── objects/          原始图片和资料
+
+SQLite
+  ├── Course / KnowledgeNode
+  ├── Question / QuestionRevision / Attempt
+  ├── ReviewTask / ReviewSession / Assessment
+  ├── SourceArtifact / SourcePassage / Answer
+  └── QuestionBankItem / QuestionBankAttempt
 ```
 
-增强会把文本或 PDF 文本层切成 `SourcePassage` 并同步到 SQLite FTS5 trigram 索引；PDF passage 带有 1-based `page_no` 和 `locator_json`，重复执行会复用原有 passage ID。也可以通过 `POST /api/enrich` 传入 `source_artifact_id` 手动增强，失败后保留资料并允许再次重试。搜索接口为 `GET /api/search?q=傅里叶`，三字符以上走 trigram FTS，短查询走简单 LIKE，结果包含 `source_artifact_id` 和 `locator_json`。旧库首次启动会补建并提交索引。搜索命中后可通过 `POST /api/question-source-link` 把已有 passage 关联到题目，再用 `GET /api/question/<id>/sources` 读取出处。`POST /api/answer` 会优先使用题目已关联 passage，再合并 FTS 命中，调用环境变量配置的 OpenAI-compatible chat/completions；没有 LLM 配置或调用失败时仍保存并返回 `unavailable`，没有来源但调用成功时返回 `unlocated`。服务重启后仍可通过 `/api/source/<id>` 查看资料、搜索和回链，通过 `/api/answer/<id>` 读取已保存回答。
+SQLite 是唯一学习事实源。模型、资料检索和题库产生的结果先作为候选或证据保存，用户确认后才成为正式字段。
 
-资料详情使用 `GET /api/source/:id` 查看资料、解析状态和 passages。
+## Main API surface
 
-回答详情使用 `GET /api/answer/:id` 读取已保存回答。
+所有接口返回 `{ "data": ... }` 或 `{ "error": ... }`。
 
-回答入口只读取 `LLM_BASE_URL`、`LLM_API_KEY`、`LLM_MODEL` 三个环境变量，不要求模型返回 JSON 或引用字段：
+### Courses and knowledge
 
-```bash
-export LLM_BASE_URL=http://127.0.0.1:8000/v1
-export LLM_API_KEY=local
-export LLM_MODEL=your-model
-curl -X POST http://127.0.0.1:8765/api/answer \
-  -H 'Content-Type: application/json' \
-  -d '{"question_id":"q-...","query":"如何使用傅里叶变换？"}'
+```text
+GET    /api/courses
+POST   /api/courses
+GET    /api/knowledge?course_id=<course_id>
+GET    /api/knowledge-nodes?course_id=<course_id>
+POST   /api/knowledge-nodes
+PATCH  /api/knowledge-nodes/<node_id>
 ```
 
-## 过渡底座的可选检查
+### Image intake
+
+```text
+POST   /api/intake/batches
+GET    /api/intake
+GET    /api/intake/<intake_id>
+PATCH  /api/intake/<intake_id>
+POST   /api/intake/<intake_id>/assets
+POST   /api/intake/<intake_id>/analyze
+POST   /api/intake/<intake_id>/resolve
+POST   /api/intake/<intake_id>/confirm
+```
+
+确认入档的最小正式字段包括：原题图片、本人过程、参考答案或参考解、错误类型、首次出错步骤、关联知识点、关联章节、题型或方法。字段可以暂缺，页面显示“待补充”，不会阻止原图保存或后续编辑。
+
+### Sources and answers
+
+```text
+POST   /api/capture/source
+POST   /api/enrich
+GET    /api/sources?limit=30
+GET    /api/source/<source_artifact_id>
+GET    /api/search?q=<keyword>
+POST   /api/question-source-link
+POST   /api/answer
+GET    /api/answer/<answer_id>
+```
+
+资料支持 PDF、PNG/JPG、DOCX、普通静态网页 URL 和短文本。PDF 按页保存定位，DOCX 保留段落/表格定位，扫描 PDF 和图片在可用时使用 OCR。`grounded`、`unlocated`、`unavailable` 是回答结果状态，不是保存门禁。
+
+### Reviews and wrong questions
+
+```text
+GET    /api/reviews/due
+GET    /api/due-review
+GET    /api/wrong-questions?course_id=<course_id>
+GET    /api/wrong-questions/<question_id>
+GET    /api/wrong-questions/<question_id>/review?review_task_id=<task_id>
+POST   /api/start
+POST   /api/wrong-questions/<question_id>/redo
+POST   /api/attempts/<attempt_id>/submit
+```
+
+`/api/wrong-questions/<question_id>/review` 是闭卷脱敏接口，只返回题面、课程和当前草稿，不返回参考答案、历史 Attempt、历史过程图片或比较诊断。
+
+### Question bank
+
+```text
+POST   /api/question-bank/preview
+POST   /api/question-bank/import
+GET    /api/question-bank?course_id=<course_id>
+PATCH  /api/question-bank/<item_id>
+PATCH  /api/question-bank
+POST   /api/question-bank/<item_id>/start
+POST   /api/question-bank/<item_id>/answer
+GET    /api/question-bank/attempts?course_id=<course_id>
+GET    /api/wrong-questions/<question_id>/similar
+```
+
+题库导入先预览校验，再确认写入。最小字段包括 `course_id`、`question_text`、`chapter`、`question_type`、`difficulty`、`reference_answer` 和 `explanation`；政治选择题可以额外提供 `options`。
+
+### Model settings
+
+```text
+GET    /api/settings/model
+PATCH  /api/settings/model
+```
+
+未保存配置时可使用 `LLM_*` 和 `LLM_FALLBACK_*` 环境变量。API key 不写入 README、脚本或 Git。
+
+## Review scheduling and notifications
+
+第一版回测使用固定的 `+3 / +7 / +10 / +14` 天排程。系统不会根据一次“会”自动宣布掌握，也不自动生成整体学习计划。
+
+`notify_due.py` 只读 SQLite，发送到期数量和最早日期，不读取题面或答案：
 
 ```bash
-python3 -m py_compile app.py run_p0_scenarios.py
+python3 notify_due.py --db /path/to/library.sqlite --now 2026-09-03T00:00:00Z
+./install_notifications.command
+./uninstall_notifications.command
+```
+
+## Validation
+
+```bash
+python3 -m py_compile app.py
+node --check frontend.js
 python3 run_p0_scenarios.py
+git diff --check
 ```
 
-这组命令只用于旧文字底座需要时的定向检查，不是新图片主线的开发前置，也不是发布门禁。开发阶段按 design.md 只验证当前切片的真实路径，不要求全量回归或全量冒烟。
+`run_p0_scenarios.py` 使用临时数据库，覆盖文字演示链、图片 intake、失败保留、课程隔离、知识候选、题库、政治客观题、回测和自评。它不能替代真实模型服务和真实手写照片验收。
 
-## 直接可落地的最终路线
+## Known limitations and next steps
 
-1. 已完成真实收录：题目文字、本人作答、资料文本或路径会写入 SQLite，缺字段也保存。
-2. FTS5 已完成：使用 `trigram` 支持中文片段，短词用 `LIKE` 补足；`/api/search?q=...` 返回 passage 和出处定位，零命中仍返回空结果，重复 `enrich` 保留 passage_id。
-3. 出处回链已完成：搜索命中可关联到题目，题目详情返回 passage 和 locator，不做自动对齐或评分。
-4. PDF 文本层解析已完成：使用现有 `pypdf` 按页提取，写入同一套 `SourcePassage`、FTS 和 locator；扫描 PDF/OCR 尚未接入，首页状态展示留作薄 UX 收尾。
-5. Context Composer + LLM 薄切片已完成：先使用已关联 passage，再合并现有 FTS 命中，返回服务端实际出处；未定位或 LLM 不可用都不阻断保存。
-6. 只有真实需要跨章节、多跳关系时才接入一个 [LightRAG](https://github.com/HKUDS/LightRAG) REST sidecar；不同时运行两套图/向量索引。若需要更强布局解析，再单独评估 [Docling](https://github.com/docling-project/docling)。
-7. 旧文字底座仍使用演示用的 2/3/7/21 天间隔；图片确认目前只落下首个 +3 天任务，后续图片回测目标为 3/7/10/14 天，具体以 design.md 为准，真实使用后再评估是否需要 [py-fsrs](https://github.com/open-spaced-repetition/py-fsrs)。
+当前主链已接通，但以下内容仍明确后置或待补强：
 
-原则只有一句：用户输入先落库，增强过程后补；状态和提示帮助用户判断，不把不完整变成阻碍。
+- 真实手写照片上的公式、题面、参考答案和首次错误步骤识别质量；
+- 复杂跨资料语义聚类、向量检索和知识树自动合并；
+- 英语具体题型；
+- 政治分析题和政治图片错题；
+- 自动学习计划、FSRS、大规模学习统计和自动主观判卷；
+- 自动生成新题；
+- 题库维护、相似题练习、资料回链和问答的完整前端操作流。
 
-“独立 Evidence”只是学习状态的结果分类；即使看过提示、资料未命中或评价不完整，Attempt/Assessment 仍会保存，用户仍可继续回测。
+后续推进顺序以真实失败证据为准：先验证图片收录和诊断质量，再补课程内知识候选确认和题库练习体验，最后再评估语义检索或更复杂的模型能力。
+
+## Repository layout
+
+```text
+index.html              前端壳层和五个视图
+frontend.css            前端视觉令牌、布局和响应式规则
+frontend.js             前端路由、状态和 API 适配
+app.py                  SQLite 存储、本地 HTTP API 和服务入口
+schema.sql              数据库结构
+fixtures/               可提交的演示数据
+objects/                本地原始资产，不提交
+library.sqlite          本地事实库，不提交
+design.md               产品边界、架构、路线和前端设计基线
+AGENTS.md               Agent 开发约束
+start.command           macOS 启动入口
+notify_due.py           到期回测只读通知
+```
+
+## Development notes
+
+- 当前唯一现役开发分支是 `mzy`；`main` 只通过 Pull Request 合并。
+- 不提交 `library.sqlite`、`objects/`、API key、密码或个人配置。
+- 修改前先读本文件和 [design.md](design.md)；修改后至少运行 Python 语法检查，涉及流程时运行定向场景。
+- 代码、运行态、文档和规则出现矛盾时，以当前代码和真实 API 为事实，再同步文档。

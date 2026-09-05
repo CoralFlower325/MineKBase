@@ -1,4 +1,60 @@
 PRAGMA foreign_keys = ON;
+CREATE TABLE IF NOT EXISTS ModelEndpoint (slot TEXT PRIMARY KEY CHECK(slot IN ('primary','fallback')), protocol TEXT, base_url TEXT, api_key TEXT, model TEXT, updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS Course (
+    course_id TEXT PRIMARY KEY,
+    course_group TEXT NOT NULL,
+    course_name TEXT NOT NULL,
+    subject_key TEXT CHECK(subject_key IN ('math','english','politics','professional') OR subject_key IS NULL),
+    created_at TEXT NOT NULL,
+    active INTEGER NOT NULL DEFAULT 1
+);
+CREATE TABLE IF NOT EXISTS KnowledgeNode (
+    knowledge_node_id TEXT PRIMARY KEY,
+    course_id TEXT NOT NULL REFERENCES Course(course_id),
+    parent_id TEXT REFERENCES KnowledgeNode(knowledge_node_id),
+    name TEXT NOT NULL,
+    aliases TEXT NOT NULL DEFAULT '[]',
+    origin TEXT NOT NULL DEFAULT 'user',
+    confirmation_state TEXT NOT NULL DEFAULT 'candidate' CHECK(confirmation_state IN ('candidate','confirmed','archived')),
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_knowledge_course_parent ON KnowledgeNode(course_id,parent_id,name);
+CREATE TABLE IF NOT EXISTS QuestionKnowledgeLink (
+    question_id TEXT NOT NULL REFERENCES Question(question_id),
+    knowledge_node_id TEXT NOT NULL REFERENCES KnowledgeNode(knowledge_node_id),
+    origin TEXT NOT NULL DEFAULT 'user',
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(question_id,knowledge_node_id)
+);
+CREATE INDEX IF NOT EXISTS idx_question_knowledge_node ON QuestionKnowledgeLink(knowledge_node_id,question_id);
+CREATE TABLE IF NOT EXISTS QuestionBankItem (
+    question_bank_item_id TEXT PRIMARY KEY,
+    course_id TEXT NOT NULL REFERENCES Course(course_id),
+    question_text TEXT,
+    image_path TEXT,
+    chapter TEXT,
+    knowledge_node_id TEXT REFERENCES KnowledgeNode(knowledge_node_id),
+    question_type TEXT,
+    difficulty TEXT,
+    reference_answer TEXT,
+    explanation TEXT,
+    source TEXT,
+    year TEXT,
+    raw_payload TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_question_bank_lookup ON QuestionBankItem(course_id,knowledge_node_id,chapter,question_type,difficulty);
+CREATE TABLE IF NOT EXISTS QuestionBankAttempt (
+    question_bank_attempt_id TEXT PRIMARY KEY,
+    question_bank_item_id TEXT NOT NULL REFERENCES QuestionBankItem(question_bank_item_id),
+    course_id TEXT NOT NULL REFERENCES Course(course_id),
+    selected_answer TEXT NOT NULL,
+    correct_answer TEXT NOT NULL,
+    is_correct INTEGER NOT NULL CHECK(is_correct IN (0,1)),
+    answered_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_question_bank_attempt_item ON QuestionBankAttempt(question_bank_item_id,answered_at);
+CREATE INDEX IF NOT EXISTS idx_question_bank_attempt_course ON QuestionBankAttempt(course_id,is_correct,answered_at);
 CREATE TABLE IF NOT EXISTS CoursePackRelease (release_id TEXT PRIMARY KEY, course_key TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS LearningObjective (learning_objective_id TEXT PRIMARY KEY, course_pack_release_id TEXT NOT NULL REFERENCES CoursePackRelease(release_id), name TEXT NOT NULL, description TEXT NOT NULL, observable_criteria TEXT NOT NULL, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS Question (question_id TEXT PRIMARY KEY, course_pack_release_id TEXT NOT NULL REFERENCES CoursePackRelease(release_id), current_question_revision_id TEXT, lifecycle_state TEXT NOT NULL CHECK(lifecycle_state IN ('candidate','active','archived')), created_at TEXT NOT NULL, FOREIGN KEY(current_question_revision_id) REFERENCES QuestionRevision(question_revision_id));
@@ -27,6 +83,8 @@ CREATE TABLE IF NOT EXISTS SourceArtifact (
     stored_path TEXT,
     raw_text TEXT,
     raw_payload TEXT,
+    subject_key TEXT CHECK(subject_key IN ('math','english','politics','professional') OR subject_key IS NULL),
+    course_id TEXT REFERENCES Course(course_id),
     parse_state TEXT NOT NULL DEFAULT 'pending',
     created_at TEXT NOT NULL
 );
@@ -50,12 +108,8 @@ CREATE TABLE IF NOT EXISTS QuestionSourceLink (
     created_at TEXT NOT NULL,
     PRIMARY KEY(question_id, source_passage_id, relation)
 );
-CREATE VIRTUAL TABLE IF NOT EXISTS SourcePassageFTS USING fts5(
-    source_passage_id UNINDEXED,
-    source_artifact_id UNINDEXED,
-    text,
-    tokenize='trigram'
-);
+-- SourcePassageFTS is an optional acceleration table. Store initializes it
+-- when the local SQLite build supports FTS5/trigram; LIKE remains the fallback.
 CREATE TABLE IF NOT EXISTS Answer (
     answer_id TEXT PRIMARY KEY,
     question_id TEXT REFERENCES Question(question_id),
@@ -71,6 +125,7 @@ CREATE TABLE IF NOT EXISTS Answer (
 CREATE TABLE IF NOT EXISTS CaptureBatch (
     batch_id TEXT PRIMARY KEY,
     subject_key TEXT CHECK(subject_key IN ('math','english','politics','professional') OR subject_key IS NULL),
+    course_id TEXT REFERENCES Course(course_id),
     created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS IntakeItem (
