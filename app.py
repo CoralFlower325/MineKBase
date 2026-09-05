@@ -898,7 +898,7 @@ class Store:
             debt_kind = history.get("initial_debt_claim") if history.get("initial_debt_claim") in {"wrong", "incomplete", "uncertain"} else "incomplete"
             response = self._draft({"response_text": history.get("response_text"), "response_selections": history.get("response_selections"), "response_assets": history.get("response_assets"), "completion_claim": history.get("completion_claim"), "external_help_reported": False, "data_origin": "demo", "display_label": "演示数据"})
             attempt = uid("attempt")
-            self.conn.execute("INSERT INTO Attempt(attempt_id,question_id,question_revision_id,review_session_id,origin_kind,submission_state,submitted_at,completion_claim,initial_debt_claim,initial_debt_claim_basis,initial_debt_claim_captured_at,response_snapshot,assistance_state,external_help_reported,submit_event_ordinal,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (attempt, question, revision, None, "initial", "submitted", submitted_at, response["completion_claim"], debt_kind, "seed_fixture", submitted_at, dumps({**response, "assistance_state": "none_observed"}), "none_observed", 0, None, as_of))
+            self.conn.execute("INSERT INTO Attempt(attempt_id,question_id,question_revision_id,review_session_id,origin_kind,submission_state,submitted_at,completion_claim,initial_debt_claim,initial_debt_claim_basis,initial_debt_claim_captured_at,response_snapshot,assistance_state,external_help_reported,submit_event_ordinal,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (attempt, question, revision, None, "initial", "submitted", submitted_at, response["completion_claim"], debt_kind, "seed_fixture", submitted_at, dumps({**response, "assistance_state": "none_observed", "grading_snapshot": grading}), "none_observed", 0, None, as_of))
             reason = {"wrong": "initial_error", "incomplete": "incomplete_attempt", "uncertain": "manual_declaration"}[debt_kind]
             task = self._schedule_in_tx(question, revision, prompt, {"trigger_ref": uid("trigger"), "trigger_kind": "attempt", "trigger_reason_kind": reason, "attempt_id": attempt, "source_question_revision_id": revision, "captured_at": submitted_at, "data_origin": "demo", "display_label": "演示数据"}, as_of)
             # Keep the disposable P0 fixture immediately due at its declared
@@ -2418,7 +2418,7 @@ class Store:
             if knowledge_node:
                 self.conn.execute("INSERT INTO QuestionKnowledgeLink(question_id,knowledge_node_id,origin,created_at) VALUES(?,?,?,?)", (question_id, knowledge_node["knowledge_node_id"], "user", created))
             process_assets = [a["asset_id"] for a in assets if a["role"] in ("my_process","mixed")]
-            response = {"schema_version":SNAPSHOT,"response_text":"","response_selections":[],"response_assets":process_assets,"completion_claim":"unknown","external_help_reported":False,"intake_id":intake_id,"asset_refs":[ref for ref in asset_refs if ref["asset_id"] in process_assets]}
+            response = {"schema_version":SNAPSHOT,"response_text":"","response_selections":[],"response_assets":process_assets,"completion_claim":"unknown","external_help_reported":False,"intake_id":intake_id,"asset_refs":[ref for ref in asset_refs if ref["asset_id"] in process_assets],"grading_snapshot":grading}
             attempt_id = uid("attempt")
             self.conn.execute("INSERT INTO Attempt(attempt_id,question_id,question_revision_id,review_session_id,origin_kind,submission_state,submitted_at,completion_claim,initial_debt_claim,initial_debt_claim_basis,initial_debt_claim_captured_at,response_snapshot,assistance_state,external_help_reported,submit_event_ordinal,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (attempt_id,question_id,revision_id,None,"initial","submitted",created,"unknown","uncertain","intake_confirm",created,dumps(response),"none_observed",0,None,created))
             task = self._schedule_in_tx(question_id,revision_id,prompt_id,{"trigger_ref":uid("trigger"),"trigger_kind":"intake_confirm","trigger_reason_kind":"initial_error","intake_id":intake_id,"captured_at":created},created)
@@ -2696,8 +2696,10 @@ class Store:
         session = self.one("SELECT review_task_id FROM ReviewSession WHERE review_session_id=?", (attempt.get("review_session_id"),)) if attempt.get("review_session_id") else None
         initial = self.one("SELECT * FROM Attempt WHERE question_id=? AND origin_kind='initial' ORDER BY created_at,submitted_at LIMIT 1", (attempt["question_id"],))
         initial_response = as_dict(loads(initial["response_snapshot"], {})) if initial else {}
-        revision = self.one("SELECT grading_reference_fixture_snapshot FROM QuestionRevision WHERE question_revision_id=?", (attempt["question_revision_id"],))
-        grading = as_dict(loads(revision["grading_reference_fixture_snapshot"], {})) if revision else {}
+        grading = as_dict(response.get("grading_snapshot"))
+        if not grading:
+            revision = self.one("SELECT grading_reference_fixture_snapshot FROM QuestionRevision WHERE question_revision_id=?", (attempt["question_revision_id"],))
+            grading = as_dict(loads(revision["grading_reference_fixture_snapshot"], {})) if revision else {}
         comparison = as_dict(response.get("comparison_draft"))
         reference_assets = self._reference_assets_from_refs(as_dict(grading).get("asset_refs"))
         next_task = self.one("SELECT * FROM ReviewTask WHERE question_id=? AND status='open' ORDER BY due_at, review_round, created_at LIMIT 1", (attempt["question_id"],))
@@ -2749,8 +2751,10 @@ class Store:
         response = as_dict(loads(attempt["response_snapshot"], {}))
         initial = self.one("SELECT * FROM Attempt WHERE question_id=? AND origin_kind='initial' ORDER BY created_at,submitted_at LIMIT 1", (attempt["question_id"],))
         initial_response = as_dict(loads(initial["response_snapshot"], {})) if initial else {}
-        revision = self.one("SELECT * FROM QuestionRevision WHERE question_revision_id=?", (attempt["question_revision_id"],))
-        grading = as_dict(loads(revision["grading_reference_fixture_snapshot"], {})) if revision else {}
+        grading = as_dict(response.get("grading_snapshot"))
+        if not grading:
+            revision = self.one("SELECT * FROM QuestionRevision WHERE question_revision_id=?", (attempt["question_revision_id"],))
+            grading = as_dict(loads(revision["grading_reference_fixture_snapshot"], {})) if revision else {}
         question = self.get_wrong_question(attempt["question_id"])
         question_text = question.get("question_text")
         image_parts = []
@@ -2812,7 +2816,8 @@ class Store:
         response_assets = self._redo_assets(as_dict(self._wrong_dto(session["question_id"]).get("grading")).get("intake_id"), as_list(draft.get("response_assets")))
         draft["response_assets"] = [a["asset_id"] for a in response_assets]
         created = self.clock()
-        response = {"schema_version": SNAPSHOT, "response_text": as_text(draft.get("response_text")), "response_selections": as_list(draft.get("response_selections")), "response_assets": draft["response_assets"], "completion_claim": draft.get("completion_claim", "unknown"), "external_help_reported": bool(draft.get("external_help_reported"))}
+        revision_snapshot = self.one("SELECT grading_reference_fixture_snapshot FROM QuestionRevision WHERE question_revision_id=?", (session["question_revision_id"],))
+        response = {"schema_version": SNAPSHOT, "response_text": as_text(draft.get("response_text")), "response_selections": as_list(draft.get("response_selections")), "response_assets": draft["response_assets"], "completion_claim": draft.get("completion_claim", "unknown"), "external_help_reported": bool(draft.get("external_help_reported")), "grading_snapshot": loads(revision_snapshot["grading_reference_fixture_snapshot"], {}) if revision_snapshot else {}}
         self.begin()
         try:
             self.conn.execute("INSERT INTO Attempt(attempt_id,question_id,question_revision_id,review_session_id,origin_kind,submission_state,submitted_at,completion_claim,initial_debt_claim,initial_debt_claim_basis,initial_debt_claim_captured_at,response_snapshot,assistance_state,external_help_reported,submit_event_ordinal,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (draft_attempt_id, session["question_id"], session["question_revision_id"], session["review_session_id"], "review", "submitted", created, response["completion_claim"], None, None, None, dumps(response), "none_observed", int(response["external_help_reported"]), None, created))
@@ -3218,7 +3223,8 @@ class Store:
                 events = as_list(loads(session["exposure_event_snapshots"], []))
                 attempt_id = uid("attempt")
                 submitted_at = self.clock()
-                response = {**draft, "assistance_state": "assisted" if events else "none_observed", "submit_event_ordinal": len(events) + 1}
+                revision_snapshot = self.one("SELECT grading_reference_fixture_snapshot FROM QuestionRevision WHERE question_revision_id=?", (session["question_revision_id"],))
+                response = {**draft, "assistance_state": "assisted" if events else "none_observed", "submit_event_ordinal": len(events) + 1, "grading_snapshot": loads(revision_snapshot["grading_reference_fixture_snapshot"], {}) if revision_snapshot else {}}
                 self.conn.execute("INSERT INTO Attempt(attempt_id,question_id,question_revision_id,review_session_id,origin_kind,submission_state,submitted_at,completion_claim,initial_debt_claim,initial_debt_claim_basis,initial_debt_claim_captured_at,response_snapshot,assistance_state,external_help_reported,submit_event_ordinal,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (attempt_id, session["question_id"], session["question_revision_id"], session_id, "review", "submitted", submitted_at, draft["completion_claim"], None, None, None, dumps(response), response["assistance_state"], int(draft["external_help_reported"]), response["submit_event_ordinal"], submitted_at))
                 self.conn.execute("UPDATE ReviewSession SET status='submitted',submitted_attempt_id=?,ended_at=?,updated_at=?,draft_payload_snapshot=? WHERE review_session_id=?", (attempt_id, submitted_at, submitted_at, dumps(draft), session_id))
                 self.conn.execute("UPDATE ReviewTask SET status='completed',completed_by_attempt_id=? WHERE review_task_id=?", (attempt_id, session["review_task_id"]))
@@ -3274,7 +3280,8 @@ class Store:
                 raw_result = "unassessed"
             assessor = payload.get("assessor_kind") if payload.get("assessor_kind") in {"human", "deterministic", "model", "user_self"} else "user_self"
             refs = []
-            fixture = loads(revision["grading_reference_fixture_snapshot"], {}) if revision else {}
+            attempt_response = as_dict(loads(attempt["response_snapshot"], {}))
+            fixture = attempt_response.get("grading_snapshot") or (loads(revision["grading_reference_fixture_snapshot"], {}) if revision else {})
             if isinstance(fixture, dict) and fixture:
                 refs.append({"reference_ref": uid("ref"), **fixture, "accepted_for_grading": True, "question_revision_id": attempt["question_revision_id"], "usage_role": "primary", "captured_at": self.clock()})
             for ref in as_list(payload.get("reference_inputs")):

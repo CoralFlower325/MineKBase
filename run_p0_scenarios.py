@@ -40,6 +40,9 @@ def run_image_smoke():
             confirmed = store.confirm_intake(intake["intake_id"])
             assert confirmed["confirmed"] and confirmed["due_at"].startswith("2026-09-08")
             question_id = confirmed["question_id"]
+            initial_attempt_id = confirmed["attempt_id"]
+            initial_before_edit = store.get_attempt(initial_attempt_id)
+            assert initial_before_edit["reference_answer"] == "待补充"
             store.patch_intake(intake["intake_id"], {"draft_fields": {
                 "question_text": "用户修正后的题面",
                 "reference_answer": "用户补充的参考解",
@@ -57,6 +60,8 @@ def run_image_smoke():
             wrong_detail_after_edit = store.get_wrong_question(question_id)
             assert wrong_detail_after_edit["question_text"] == "用户修正后的题面"
             assert wrong_detail_after_edit["grading"]["error_type"] == "method_selection"
+            initial_after_edit = store.get_attempt(initial_attempt_id)
+            assert initial_after_edit["reference_answer"] == "待补充"
             wrong_detail = store.get_wrong_question(question_id)
             assert any((asset.get("review_role") or asset.get("role")) == "my_process" for asset in wrong_detail["process_assets"])
             initial = store.one("SELECT response_snapshot FROM Attempt WHERE question_id=? AND origin_kind='initial'", (question_id,))
