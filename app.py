@@ -3572,6 +3572,38 @@ class Store:
                 lines.append(f"- 资料出处：{'；'.join(source_labels)}")
             for asset in detail.get("assets", []):
                 lines.append(f"- 题面图片：![{asset.get('original_filename', 'image')}]({asset.get('media_url')})")
+            if detail.get("next_due_at"):
+                lines.append(f"- 下一次回测：{detail['next_due_at']}")
+            attempts = self.all("SELECT attempt_id,origin_kind,submitted_at,completion_claim,response_snapshot FROM Attempt WHERE question_id=? AND submission_state='submitted' ORDER BY submitted_at", (row["question_id"],))
+            if attempts:
+                lines.extend(["", "### 作答与回测记录", ""])
+                review_round = 0
+                for attempt in attempts:
+                    response = as_dict(loads(attempt["response_snapshot"], {}))
+                    if attempt["origin_kind"] == "initial":
+                        label = "初次作答"
+                    else:
+                        review_round += 1
+                        label = f"回测 {review_round}"
+                    lines.append(f"#### {label} · {attempt['submitted_at'] or '时间待补充'}")
+                    lines.append(f"- 完成声明：{attempt['completion_claim'] or '待补充'}")
+                    response_text = as_text(response.get("response_text")).strip()
+                    if response_text:
+                        lines.append(f"- 作答文字：{response_text}")
+                    response_assets = self._attempt_asset_rows(response.get("response_assets"))
+                    for asset in response_assets:
+                        lines.append(f"- 解题过程图片：![{asset.get('original_filename', 'process')}]({asset.get('media_url')})")
+                    comparison = as_dict(response.get("comparison_draft"))
+                    if comparison:
+                        lines.append(f"- 比较状态：{comparison.get('status') or '待补充'}")
+                        if include_answers:
+                            lines.extend([
+                                f"- 回测错误类型：{ERROR_TYPES.get(comparison.get('error_type'), '待确认')}",
+                                f"- 回测错误原因：{comparison.get('error_reason') or '待补充'}",
+                                f"- 回测首次出错步骤：{comparison.get('error_breakpoint') or '待补充'}",
+                                f"- 回测正确思路：{comparison.get('correct_approach') or '待补充'}",
+                            ])
+                    lines.append("")
             if include_answers:
                 lines.extend(["", f"**参考答案**：{grading.get('reference_answer') or '待补充'}", f"**错误类型**：{ERROR_TYPES.get(grading.get('error_type'), '待确认')}", f"**错误原因**：{grading.get('error_reason') or '待补充'}", f"**首次出错步骤**：{grading.get('error_breakpoint') or '待补充'}", f"**正确思路**：{grading.get('correct_approach') or '待补充'}"])
             lines.append("\n---\n")
