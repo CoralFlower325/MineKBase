@@ -60,6 +60,7 @@ def run_image_smoke():
             wrong_detail_after_edit = store.get_wrong_question(question_id)
             assert wrong_detail_after_edit["question_text"] == "用户修正后的题面"
             assert wrong_detail_after_edit["grading"]["error_type"] == "method_selection"
+            assert wrong_detail_after_edit["grading"]["field_sources"]["reference_answer"] == "用户修改"
             try:
                 store.patch_intake(intake["intake_id"], {"draft_fields": {"error_type": "unsupported"}})
                 raise AssertionError("invalid intake error type was accepted")
@@ -87,7 +88,7 @@ def run_image_smoke():
             assert submitted["comparison_draft"]["error_type"] == "method_selection"
             answer_export = store.export_wrong_questions(include_answers=True)
             self_test_export = store.export_wrong_questions(include_answers=False)
-            assert "### 作答与回测记录" in answer_export and "回测 1" in answer_export and "redo" in answer_export
+            assert "### 作答与回测记录" in answer_export and "回测 1" in answer_export and "redo" in answer_export and "- 字段来源：" in answer_export
             assert "回测错误类型：推导或计算出错" not in self_test_export and "redo" in self_test_export
             history = store.get_wrong_question(question_id)["attempts"]
             assert len(history) == 2 and history[0]["origin_kind"] == "initial" and history[1]["origin_kind"] == "review"
