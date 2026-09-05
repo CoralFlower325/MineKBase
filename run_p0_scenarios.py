@@ -156,6 +156,23 @@ def run_question_bank_smoke():
             assert similar[0]["match_score"] > similar[1]["match_score"]
             filtered = store.list_question_bank({"course_id": course["course_id"], "knowledge_node_id": node["knowledge_node_id"]})
             assert len(filtered) == 1 and filtered[0]["question_text"] == "同知识点相似题"
+            answer_intake = store.create_intake_batch([{"filename": "reference.png", "mime": "image/png", "data": b"reference", "role": "reference"}], course_id=course["course_id"])
+            store.patch_intake(answer_intake["intake_id"], {"draft_fields": {
+                "analysis_status": "draft",
+                "question_text": "判断时序逻辑电路的状态转移",
+                "reference_answer": "参考答案图提取的答案",
+                "error_reason": "方法选择错误",
+                "error_breakpoint": "第一次列状态方程时",
+                "chapter": "数字逻辑",
+                "question_type": "选择题",
+                "knowledge_node_id": node["knowledge_node_id"],
+            }})
+            resolved = store.resolve_intake(answer_intake["intake_id"])
+            answer_candidates = resolved["draft_fields"]["answer_candidates"]
+            assert answer_candidates and answer_candidates[0]["origin"] == "reference_image"
+            confirmed_answer = store.confirm_intake(answer_intake["intake_id"])
+            grading = store.one("SELECT grading_reference_fixture_snapshot FROM QuestionRevision WHERE question_id=?", (confirmed_answer["question_id"],))
+            assert app.loads(grading[0], {})["answer_origin"] == "reference_image"
             before_questions = store.one("SELECT COUNT(*) AS count FROM Question")["count"]
             practice = store.start_question_bank_item(filtered[0]["question_bank_item_id"])
             practice_draft = practice["draft_fields"]

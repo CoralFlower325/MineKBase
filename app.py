@@ -32,6 +32,11 @@ EVIDENCE = "evidence-v1"
 VISIBILITY = "visibility-v1"
 IMAGE_ROLES = {"question", "my_process", "reference", "redo_process", "mixed"}
 SUBJECT_KEYS = {"math", "english", "politics", "professional"}
+ERROR_TYPES = {
+    "knowledge_gap": "知识点不会",
+    "method_selection": "方法选择错误",
+    "derivation_calculation": "推导或计算出错",
+}
 REVIEW_OFFSETS = (3, 7, 10, 14)
 SCHEMA_VERSION = 3
 
@@ -865,7 +870,7 @@ class Store:
         fields = [
             key for key in (
                 "question_text", "reference_answer", "subject_key", "chapter",
-                "knowledge_point", "question_type", "error_reason",
+                "knowledge_point", "question_type", "error_type", "error_reason",
                 "error_breakpoint", "correct_approach",
             ) if draft.get(key) not in (None, "")
         ]
@@ -886,11 +891,13 @@ class Store:
         answer_origin = {
             "matched": "匹配题目",
             "reference_image": "参考答案图/模型",
+            "user_material": "用户资料候选",
+            "question_bank": "题库导入",
             "model": "模型候选",
         }.get(as_text(draft.get("answer_origin")), "模型候选")
         for key in (
             "question_text", "reference_answer", "subject_key", "chapter",
-            "knowledge_point", "question_type", "error_reason",
+            "knowledge_point", "question_type", "error_type", "error_reason",
             "error_breakpoint", "correct_approach",
         ):
             if draft.get(key) in (None, "") or sources.get(key):
@@ -899,11 +906,42 @@ class Store:
                 sources[key] = "原图/用户"
             elif key == "reference_answer":
                 sources[key] = answer_origin
-            elif key in {"subject_key", "chapter", "knowledge_point", "question_type"} and draft.get("tag_candidates"):
+            elif key in {"subject_key", "chapter", "knowledge_point", "question_type", "error_type"} and draft.get("tag_candidates"):
                 sources[key] = "资料候选"
             else:
                 sources[key] = "模型候选"
         return sources
+
+    def _answer_candidates(self, draft, batch_id, candidates):
+        """Build a transparent answer-source ladder for user confirmation."""
+        draft = as_dict(draft)
+        result = []
+        seen = set()
+
+        def add(origin, label, answer, priority, **extra):
+            answer = as_text(answer).strip()
+            if not answer or answer in seen:
+                return
+            seen.add(answer)
+            result.append({"origin": origin, "label": label, "answer": answer, "priority": priority, **extra})
+
+        reference_assets = self.all("SELECT asset_id,role FROM ImageAsset WHERE batch_id=? AND state='saved'", (batch_id,))
+        if any(row["role"] == "reference" for row in reference_assets):
+            add("reference_image", "参考答案图（模型提取，需确认）", draft.get("reference_answer"), 1, asset_ids=[row["asset_id"] for row in reference_assets if row["role"] == "reference"])
+
+        for candidate in candidates:
+            kind = as_text(candidate.get("kind"))
+            if kind == "source":
+                add("user_material", "用户资料候选（需确认）", candidate.get("text"), 2, source_passage_id=candidate.get("source_passage_id"), source_name=candidate.get("source_name"), page_no=candidate.get("page_no"))
+            elif kind == "question_bank":
+                add("question_bank", "已导入题库答案", as_dict(candidate.get("grading")).get("reference_answer"), 3, question_bank_item_id=candidate.get("question_bank_item_id"))
+            elif kind == "question":
+                add("matched", "已确认题目答案", as_dict(candidate.get("grading")).get("reference_answer"), 3, question_id=candidate.get("question_id"))
+
+        if not any(item["origin"] == "reference_image" for item in result):
+            add("model", "LLM 解答（需确认）", draft.get("reference_answer"), 4)
+        result.sort(key=lambda item: (item["priority"], item["label"], item["answer"]))
+        return result
 
     def list_intakes(self):
         rows = self.all("SELECT i.*, b.subject_key, b.course_id, c.course_name, c.course_group, (SELECT COUNT(*) FROM ImageAsset a WHERE a.batch_id=i.batch_id) AS asset_count FROM IntakeItem i JOIN CaptureBatch b ON b.batch_id=i.batch_id LEFT JOIN Course c ON c.course_id=b.course_id ORDER BY i.updated_at DESC, i.created_at DESC")
@@ -929,7 +967,7 @@ class Store:
                 incoming_fields = payload["draft_fields"]
                 field_sources = dict(draft.get("field_sources")) if isinstance(draft.get("field_sources"), dict) else {}
                 for key in incoming_fields:
-                    if key in {"question_text", "reference_answer", "subject_key", "chapter", "knowledge_point", "question_type", "error_reason", "error_breakpoint", "correct_approach"} and incoming_fields.get(key) != draft.get(key):
+                    if key in {"question_text", "reference_answer", "subject_key", "chapter", "knowledge_point", "question_type", "error_type", "error_reason", "error_breakpoint", "correct_approach"} and incoming_fields.get(key) != draft.get(key):
                         field_sources[key] = "用户修改"
                 draft.update(incoming_fields)
                 if field_sources:
@@ -1611,12 +1649,12 @@ class Store:
 
     def _extract_analysis(self, raw, subject_hint=None):
         import re
-        fields = {"question_text":"", "reference_answer":"", "subject_key": subject_hint if subject_hint in SUBJECT_KEYS else None, "chapter":"", "knowledge_point":"", "question_type":"", "error_reason":"", "error_breakpoint":"", "correct_approach":""}
+        fields = {"question_text":"", "reference_answer":"", "subject_key": subject_hint if subject_hint in SUBJECT_KEYS else None, "chapter":"", "knowledge_point":"", "question_type":"", "error_type":"", "error_reason":"", "error_breakpoint":"", "correct_approach":""}
         aliases = {
             "question_text": r"(?:题面|题目(?:要求)?|question(?:_text)?)",
             "reference_answer": r"(?:答案|标准答案|模型答案|参考答案|reference[_ ]?answer)",
             "subject_key": r"(?:科目|subject[_ ]?key)", "chapter": r"(?:章节|chapter)", "knowledge_point": r"(?:知识点|knowledge[_ ]?point)", "question_type": r"(?:题型|question[_ ]?type)",
-            "error_reason": r"(?:做错原因|错误原因|error[_ ]?reason)", "error_breakpoint": r"(?:解题断点|首次偏离|error[_ ]?breakpoint)", "correct_approach": r"(?:正确思路|correct[_ ]?approach)"
+            "error_type": r"(?:错误类型|error[_ ]?type)", "error_reason": r"(?:做错原因|错误原因|error[_ ]?reason)", "error_breakpoint": r"(?:解题断点|首次偏离|error[_ ]?breakpoint)", "correct_approach": r"(?:正确思路|correct[_ ]?approach)"
         }
         # Models commonly use either "标题：内容" or a Markdown heading followed
         # by content on the next line. Parse line starts only, and keep raw_analysis
@@ -1651,6 +1689,14 @@ class Store:
                 value = next((subject for subject, names in subject_aliases.items() if any(name in lowered for name in names)), None)
                 if value is None and subject_hint in SUBJECT_KEYS:
                     value = subject_hint
+            if key == "error_type":
+                lowered = value.lower()
+                aliases = {
+                    "knowledge_gap": ("知识点不会", "知识点不熟", "知识缺失", "不会"),
+                    "method_selection": ("方法选择错误", "方法错误", "思路错误", "选法错误"),
+                    "derivation_calculation": ("推导或计算出错", "推导错误", "计算错误", "计算出错", "运算错误"),
+                }
+                value = next((error_type for error_type, names in aliases.items() if any(name in lowered for name in names)), "")
             fields[key] = value
         return fields
 
@@ -1667,7 +1713,7 @@ class Store:
         if not assets: raise DomainError("no_assets", "intake has no saved images", {"intake_id": intake_id})
         draft.update({"analysis_status": "analyzing", "analysis_error": ""})
         self.begin(); self.conn.execute("UPDATE IntakeItem SET draft_fields=?,updated_at=? WHERE intake_id=?", (dumps(draft), self.clock(), intake_id)); self.commit()
-        prompt_lines = ["你是错题分析助手。请阅读按顺序提供的图片，输出普通文本或 Markdown，并尽量使用以下标题：题面、标准答案、科目、章节、知识点、题型、做错原因、解题断点、正确思路。", "区分题目要求、我的解题步骤、标准答案/模型答案；指出我具体在哪一步开始偏离，错误属于概念、条件理解、公式使用、计算、推理、表达或其他原因。", "不确定的内容标记为‘待确认’，不要猜测填满字段；分类字段可以为空。"]
+        prompt_lines = ["你是错题分析助手。请阅读按顺序提供的图片，输出普通文本或 Markdown，并尽量使用以下标题：题面、标准答案、科目、章节、知识点、题型、错误类型、做错原因、解题断点、正确思路。", "区分题目要求、我的解题步骤、标准答案/模型答案；指出我具体在哪一步开始偏离。错误类型只能从三项中选择：知识点不会、方法选择错误、推导或计算出错；如果无法确定就留空并写待确认。", "不确定的内容标记为‘待确认’，不要猜测填满字段；分类字段可以为空。"]
         image_parts = []
         for asset in assets:
             path = ROOT / asset["path"]
@@ -1788,14 +1834,36 @@ class Store:
                 seen.add(key)
                 units = loads(item["question_units"], {})
                 grading = loads(item["grading_reference_fixture_snapshot"], {})
+                if row["course_id"] and as_text(grading.get("course_id")) not in {"", row["course_id"]}:
+                    continue
                 question_text = units[0].get("question_text", "") if isinstance(units, list) and units and isinstance(units[0], dict) else units.get("question_text", "") if isinstance(units, dict) else ""
                 candidates.append({"kind":"question", "question_id":key, "question_revision_id":item["question_revision_id"], "question_text":question_text, "grading":{"reference_answer":as_text(grading.get("reference_answer"))}})
+            bank_filters = {"course_id": row["course_id"], "limit": 30} if row["course_id"] else {}
+            bank_rows = self.list_question_bank(bank_filters) if bank_filters else []
+            fragments = [fragment.lower() for fragment in fragments if len(fragment) >= 2]
+            for item in bank_rows:
+                haystack = " ".join(as_text(item.get(key)) for key in ("question_text", "chapter", "question_type", "difficulty")).lower()
+                metadata_match = any([
+                    as_text(draft.get("chapter")).strip() and as_text(item.get("chapter")).strip() == as_text(draft.get("chapter")).strip(),
+                    as_text(draft.get("question_type")).strip() and as_text(item.get("question_type")).strip() == as_text(draft.get("question_type")).strip(),
+                    as_text(draft.get("knowledge_node_id")).strip() and as_text(item.get("knowledge_node_id")).strip() == as_text(draft.get("knowledge_node_id")).strip(),
+                ])
+                text_match = any(fragment in haystack for fragment in fragments[:6])
+                if not metadata_match and not text_match and len([c for c in candidates if c.get("kind") == "question_bank"]) >= 8:
+                    continue
+                candidates.append({"kind": "question_bank", "question_bank_item_id": item["question_bank_item_id"], "question_text": item.get("question_text"), "grading": {"reference_answer": item.get("reference_answer")}, "chapter": item.get("chapter"), "question_type": item.get("question_type"), "difficulty": item.get("difficulty"), "explanation": item.get("explanation"), "source": item.get("source"), "year": item.get("year")})
+                if len([c for c in candidates if c.get("kind") == "question_bank"]) >= 8:
+                    break
         subject = draft.get("subject_key") if draft.get("subject_key") in SUBJECT_KEYS else row["subject_key"]
         source_refs = [{k:c.get(k) for k in ("source_passage_id","source_artifact_id","locator") if c.get(k)} for c in candidates if c.get("kind")=="source"]
         tag_candidates = self._tag_candidates(draft, [c for c in candidates if c.get("kind") == "source"], subject)
         has_question = any(c.get("kind")=="question" for c in candidates)
         has_source = any(c.get("kind")=="source" for c in candidates)
-        draft.update({"retrieval_query": query, "resolution_kind":"matched" if has_question else "model", "resolution_label":"匹配题目" if has_question else "资料参考" if has_source else "待补充", "match_candidates":candidates, "source_refs":source_refs, "tag_candidates":tag_candidates, "answer_origin":"matched" if has_question else "reference_image" if any(a["role"]=="reference" for a in self.all("SELECT role FROM ImageAsset WHERE batch_id=?", (row["batch_id"],))) else "model"})
+        answer_candidates = self._answer_candidates(draft, row["batch_id"], candidates)
+        manual_answer = as_text(as_dict(draft.get("field_sources")).get("reference_answer")).startswith(("用户修改", "用户选择"))
+        current_origin = as_text(draft.get("answer_origin"))
+        answer_origin = current_origin if manual_answer and current_origin else (answer_candidates[0]["origin"] if answer_candidates else "model")
+        draft.update({"retrieval_query": query, "resolution_kind":"matched" if has_question else "model", "resolution_label":"匹配题目" if has_question else "资料参考" if has_source else "待补充", "match_candidates":candidates, "source_refs":source_refs, "tag_candidates":tag_candidates, "answer_candidates":answer_candidates, "answer_conflict":len(answer_candidates) > 1, "answer_origin":answer_origin})
         self.begin()
         try:
             self.conn.execute("UPDATE IntakeItem SET draft_fields=?,updated_at=? WHERE intake_id=?", (dumps(draft), self.clock(), intake_id)); self.commit()
@@ -1831,7 +1899,7 @@ class Store:
                 raise DomainError("invalid_knowledge_node", "knowledge node not found", {"knowledge_node_id": knowledge_node_id})
             if knowledge_node and knowledge_node["course_id"] != row["course_id"]:
                 raise DomainError("invalid_knowledge_node", "knowledge node is not in the selected course", {"knowledge_node_id": knowledge_node_id})
-            grading = {"reference_answer":required["reference_answer"],"error_reason":required["error_reason"],"error_breakpoint":required["error_breakpoint"],"correct_approach":as_text(draft.get("correct_approach")),"subject_key":subject,"course_id":row["course_id"],"knowledge_node_id":knowledge_node_id,"knowledge_point":knowledge_node["name"] if knowledge_node else draft.get("knowledge_point"),"chapter":draft.get("chapter"),"question_type":draft.get("question_type"),"intake_id":intake_id,"asset_refs":asset_refs,"selected_question_id":draft.get("selected_question_id"),"selected_source_passage_ids":selected_source_ids,"question_image_status":"已保存题面" if question_assets else "待补题面"}
+            grading = {"reference_answer":required["reference_answer"],"error_type":as_text(draft.get("error_type")),"error_reason":required["error_reason"],"error_breakpoint":required["error_breakpoint"],"correct_approach":as_text(draft.get("correct_approach")),"subject_key":subject,"course_id":row["course_id"],"knowledge_node_id":knowledge_node_id,"knowledge_point":knowledge_node["name"] if knowledge_node else draft.get("knowledge_point"),"chapter":draft.get("chapter"),"question_type":draft.get("question_type"),"intake_id":intake_id,"asset_refs":asset_refs,"selected_question_id":draft.get("selected_question_id"),"selected_source_passage_ids":selected_source_ids,"answer_origin":as_text(draft.get("answer_origin")) or "model","answer_candidates":as_list(draft.get("answer_candidates")),"question_image_status":"已保存题面" if question_assets else "待补题面"}
             presentation = {"schema_version":SNAPSHOT,"content":question_text,"blocks":[{"block_ref":"question","kind":"text","content":question_text,"leakage_state":"clean"}],"asset_refs":presentation_refs}
             self.conn.execute("INSERT INTO Question(question_id,course_pack_release_id,current_question_revision_id,lifecycle_state,created_at) VALUES(?,?,?,?,?)", (question_id,release_id,None,"active",created))
             self.conn.execute("INSERT INTO QuestionRevision(question_revision_id,question_id,revision_no,revision_state,supersedes_revision_id,current_review_prompt_revision_id,question_units,objective_mapping_snapshot,grading_reference_fixture_snapshot,help_content_fixture_snapshot,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)", (revision_id,question_id,1,"confirmed",None,None,dumps(units),dumps(mapping),dumps(grading),dumps([]),created))
@@ -1955,7 +2023,7 @@ class Store:
                 grading = as_dict(item.get("grading"))
                 if any(as_text(grading.get(key)).strip() != value for key, value in filters.items()):
                     continue
-                result.append({"question_id":item["question_id"],"question_text":item["question_text"],"subject_key":grading.get("subject_key"),"course_id":item.get("course_id"),"course_name":item.get("course_name"),"chapter":grading.get("chapter"),"knowledge_point":grading.get("knowledge_point"),"question_type":grading.get("question_type"),"asset_count":len(item["assets"]),"reference_answer":grading.get("reference_answer"),"error_reason":grading.get("error_reason"),"next_due_at":item["next_due_at"],"data_origin":item.get("data_origin"),"display_label":item.get("display_label")})
+                result.append({"question_id":item["question_id"],"question_text":item["question_text"],"subject_key":grading.get("subject_key"),"course_id":item.get("course_id"),"course_name":item.get("course_name"),"chapter":grading.get("chapter"),"knowledge_point":grading.get("knowledge_point"),"question_type":grading.get("question_type"),"error_type":grading.get("error_type"),"asset_count":len(item["assets"]),"reference_answer":grading.get("reference_answer"),"error_reason":grading.get("error_reason"),"next_due_at":item["next_due_at"],"data_origin":item.get("data_origin"),"display_label":item.get("display_label")})
         return result
 
     def get_wrong_question(self, question_id):
@@ -2909,7 +2977,7 @@ class Store:
             for asset in detail.get("assets", []):
                 lines.append(f"- 题面图片：![{asset.get('original_filename', 'image')}]({asset.get('media_url')})")
             if include_answers:
-                lines.extend(["", f"**参考答案**：{grading.get('reference_answer') or '待补充'}", f"**错误原因**：{grading.get('error_reason') or '待补充'}", f"**解题断点**：{grading.get('error_breakpoint') or '待补充'}", f"**正确思路**：{grading.get('correct_approach') or '待补充'}"])
+                lines.extend(["", f"**参考答案**：{grading.get('reference_answer') or '待补充'}", f"**错误类型**：{ERROR_TYPES.get(grading.get('error_type'), '待确认')}", f"**错误原因**：{grading.get('error_reason') or '待补充'}", f"**解题断点**：{grading.get('error_breakpoint') or '待补充'}", f"**正确思路**：{grading.get('correct_approach') or '待补充'}"])
             lines.append("\n---\n")
         return "\n".join(lines).rstrip() + "\n"
 
