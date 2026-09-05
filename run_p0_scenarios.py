@@ -42,13 +42,18 @@ def run_image_smoke():
             assert failed["draft_fields"]["ocr_status"] == "ready"
             assert failed["draft_fields"]["ocr_text"] == "图片 1：OCR 题面线索"
             assert prompts and "OCR 题面线索" in prompts[0] and "原图" in prompts[0]
+            store._invoke_with_fallback = lambda _prompt, _assets: ('{"题面":"模型识别题面", "参考解":"模型参考解", "错误类型":"方法选择错误", "首次出错步骤":"第二步", "错误分析":"方法选择错误"}', "test", [])
+            analyzed = store.analyze_intake(intake["intake_id"])
+            assert analyzed["draft_fields"]["analysis_status"] == "draft"
+            assert analyzed["draft_fields"]["question_text"] == "模型识别题面"
+            assert analyzed["draft_fields"]["error_type"] == "method_selection"
             store.resolve_intake(intake["intake_id"])
             confirmed = store.confirm_intake(intake["intake_id"])
             assert confirmed["confirmed"] and confirmed["due_at"].startswith("2026-09-08")
             question_id = confirmed["question_id"]
             initial_attempt_id = confirmed["attempt_id"]
             initial_before_edit = store.get_attempt(initial_attempt_id)
-            assert initial_before_edit["reference_answer"] == "待补充"
+            assert initial_before_edit["reference_answer"] == "模型参考解"
             store.patch_intake(intake["intake_id"], {"draft_fields": {
                 "question_text": "用户修正后的题面",
                 "reference_answer": "用户补充的参考解",
@@ -73,7 +78,7 @@ def run_image_smoke():
             except app.DomainError as error:
                 assert error.code == "invalid_error_type"
             initial_after_edit = store.get_attempt(initial_attempt_id)
-            assert initial_after_edit["reference_answer"] == "待补充"
+            assert initial_after_edit["reference_answer"] == "模型参考解"
             wrong_detail = store.get_wrong_question(question_id)
             assert any((asset.get("review_role") or asset.get("role")) == "my_process" for asset in wrong_detail["process_assets"])
             initial = store.one("SELECT response_snapshot FROM Attempt WHERE question_id=? AND origin_kind='initial'", (question_id,))
