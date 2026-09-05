@@ -255,6 +255,7 @@ def run_question_bank_smoke():
             assert practice_draft["knowledge_node_id"] == node["knowledge_node_id"]
             assert practice_draft["knowledge_point"] == "时序逻辑"
             assert practice_draft["answer_origin"] == "question_bank"
+            assert practice_draft["field_sources"]["subject_key"] == "题库导入"
             assert practice_draft["reference_answer"] == "A"
             assert store.one("SELECT COUNT(*) AS count FROM Question")["count"] == before_questions
             practice_confirmed = store.confirm_intake(practice["intake_id"])

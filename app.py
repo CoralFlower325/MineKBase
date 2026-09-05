@@ -720,6 +720,7 @@ class Store:
             "field_sources": {
                 "question_text": "题库导入",
                 "reference_answer": "题库导入",
+                "subject_key": "题库导入",
                 "chapter": "题库导入",
                 "knowledge_point": "题库导入",
                 "question_type": "题库导入",
