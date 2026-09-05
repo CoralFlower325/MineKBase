@@ -1492,6 +1492,18 @@ class Store:
             self.conn.execute("DELETE FROM QuestionKnowledgeLink WHERE question_id=?", (question_id,))
             if knowledge_node:
                 self.conn.execute("INSERT INTO QuestionKnowledgeLink(question_id,knowledge_node_id,origin,created_at) VALUES(?,?,?,?)", (question_id, knowledge_node_id, "user", self.clock()))
+        if "selected_source_passage_ids" in draft:
+            selected_source_ids = []
+            for passage_id in as_list(draft.get("selected_source_passage_ids")):
+                passage_id = as_text(passage_id).strip()
+                if passage_id and passage_id not in selected_source_ids and self.one("SELECT source_passage_id FROM SourcePassage WHERE source_passage_id=?", (passage_id,)):
+                    selected_source_ids.append(passage_id)
+            grading["selected_source_passage_ids"] = selected_source_ids
+            old_link = self.one("SELECT learning_objective_id FROM QuestionSourceLink WHERE question_id=? AND origin='intake_resolve' ORDER BY created_at LIMIT 1", (question_id,))
+            learning_objective_id = old_link["learning_objective_id"] if old_link else None
+            self.conn.execute("DELETE FROM QuestionSourceLink WHERE question_id=? AND origin='intake_resolve'", (question_id,))
+            for passage_id in selected_source_ids:
+                self.conn.execute("INSERT OR IGNORE INTO QuestionSourceLink(question_id,learning_objective_id,source_passage_id,relation,origin,created_at) VALUES(?,?,?,?,?,?)", (question_id, learning_objective_id, passage_id, "supports", "intake_resolve", self.clock()))
         self.conn.execute("UPDATE QuestionRevision SET grading_reference_fixture_snapshot=? WHERE question_revision_id=?", (dumps(grading), revision["question_revision_id"]))
 
     def media_asset(self, asset_id):

@@ -322,6 +322,12 @@ def run_knowledge_candidate_smoke():
             replacement_link = store.one("SELECT question_id FROM QuestionKnowledgeLink WHERE question_id=? AND knowledge_node_id=?", (confirmed["question_id"], replacement["knowledge_node_id"]))
             old_link = store.one("SELECT question_id FROM QuestionKnowledgeLink WHERE question_id=? AND knowledge_node_id=?", (confirmed["question_id"], point["knowledge_node_id"]))
             assert replacement_link and old_link is None
+            source = store.capture_source({"source_name": "树与图教材", "course_id": course["course_id"], "raw_text": "二叉树遍历的递归定义。"})
+            passage_id = store.enrich_source(source["source_artifact_id"])["source_passage_ids"][0]
+            store.patch_intake(intake["intake_id"], {"draft_fields": {"selected_source_passage_ids": [passage_id]}})
+            assert store.get_question_sources(confirmed["question_id"])[0]["source_passage_id"] == passage_id
+            store.patch_intake(intake["intake_id"], {"draft_fields": {"selected_source_passage_ids": []}})
+            assert store.get_question_sources(confirmed["question_id"])[0:] == []
             return {"status": "passed", "knowledge_node_id": point["knowledge_node_id"]}
         finally:
             store.conn.close()
