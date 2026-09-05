@@ -375,6 +375,12 @@ def run_wrong_course_filter_smoke():
                 store.create_course({"course_group": "电子类考研", "course_name": "信号与系统", "subject_key": "professional"}),
                 store.create_course({"course_group": "电子类考研", "course_name": "数字电路", "subject_key": "professional"}),
             ]
+            for course, text in zip(courses, ("课程隔离资料：傅里叶变换", "课程隔离资料：逻辑门")):
+                artifact = store.capture_source({"source_name": course["course_name"] + "资料", "course_id": course["course_id"], "raw_text": text})
+                assert store.enrich_source(artifact["source_artifact_id"])["parse_state"] == "ready"
+            scoped_sources = store.retrieve("课程隔离资料", primary_subject="professional", primary_course_id=courses[0]["course_id"])
+            assert scoped_sources and all(item.get("course_id") in {None, courses[0]["course_id"]} for item in scoped_sources)
+            assert all(item.get("source_name") != "数字电路资料" for item in scoped_sources)
             intakes = []
             for index, course in enumerate(courses, start=1):
                 intake = store.create_intake_batch([], course_id=course["course_id"])

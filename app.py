@@ -1912,7 +1912,7 @@ class Store:
             parts.append(text)
         return " ".join(parts)[:max(1, int(max_length))]
 
-    def retrieve(self, query, primary_subject=None, related_subjects=None, limit=8):
+    def retrieve(self, query, primary_subject=None, related_subjects=None, limit=8, primary_course_id=None, related_course_ids=None):
         """Single FTS/LIKE retriever used by search, resolve and answering."""
         import re
         query = as_text(query).strip()
@@ -1920,6 +1920,8 @@ class Store:
             return []
         primary_subject = primary_subject if primary_subject in SUBJECT_KEYS else None
         related = [s for s in as_list(related_subjects) if s in SUBJECT_KEYS and s != primary_subject]
+        primary_course_id = as_text(primary_course_id).strip() or None
+        related_courses = [as_text(course_id).strip() for course_id in as_list(related_course_ids) if as_text(course_id).strip() and as_text(course_id).strip() != primary_course_id]
         terms = re.findall(r"[A-Za-z0-9_]+|[\u4e00-\u9fff]{2,}", query)
         chunks = []
         for term in terms:
@@ -1934,15 +1936,21 @@ class Store:
             allowed_subjects = [primary_subject] + related
             subject_clause = " AND (a.subject_key IS NULL OR a.subject_key IN (" + ",".join("?" for _ in allowed_subjects) + "))"
             subject_args.extend(allowed_subjects)
+        course_clause = ""
+        course_args = []
+        if primary_course_id:
+            allowed_courses = [primary_course_id] + related_courses
+            course_clause = " AND (a.course_id IS NULL OR a.course_id IN (" + ",".join("?" for _ in allowed_courses) + "))"
+            course_args.extend(allowed_courses)
         fts_rows = []
         if chunks and self.fts_available:
             match = " OR ".join('"' + token.replace('"', '""') + '"' for token in chunks)
             try:
                 fts_rows = self.all(
-                    "SELECT p.source_passage_id,p.source_artifact_id,p.text,p.page_no,p.bbox,p.locator_json,a.source_name,a.subject_key,bm25(SourcePassageFTS) AS score "
+                    "SELECT p.source_passage_id,p.source_artifact_id,p.text,p.page_no,p.bbox,p.locator_json,a.source_name,a.subject_key,a.course_id,bm25(SourcePassageFTS) AS score "
                     "FROM SourcePassage p JOIN SourcePassageFTS f ON f.source_passage_id=p.source_passage_id "
-                    "JOIN SourceArtifact a ON a.source_artifact_id=p.source_artifact_id WHERE SourcePassageFTS MATCH ?" + subject_clause + " ORDER BY score LIMIT ?",
-                    (match, *subject_args, max(limit * 6, 24)),
+                    "JOIN SourceArtifact a ON a.source_artifact_id=p.source_artifact_id WHERE SourcePassageFTS MATCH ?" + subject_clause + course_clause + " ORDER BY score LIMIT ?",
+                    (match, *subject_args, *course_args, max(limit * 6, 24)),
                 )
             except sqlite3.OperationalError:
                 fts_rows = []
@@ -1955,16 +1963,19 @@ class Store:
         like_terms = list(dict.fromkeys(like_terms + [query]))[:12]
         clauses = " OR ".join("(COALESCE(p.text,'') LIKE ? OR COALESCE(a.source_name,'') LIKE ?)" for _ in like_terms)
         like_rows = self.all(
-            "SELECT p.source_passage_id,p.source_artifact_id,p.text,p.page_no,p.bbox,p.locator_json,a.source_name,a.subject_key,NULL AS score "
-            f"FROM SourcePassage p JOIN SourceArtifact a ON a.source_artifact_id=p.source_artifact_id WHERE ({clauses})" + subject_clause + " ORDER BY p.source_artifact_id,p.ordinal",
-            tuple(value for term in (like_terms or [query]) for value in (f"%{term}%", f"%{term}%")) + tuple(subject_args),
+            "SELECT p.source_passage_id,p.source_artifact_id,p.text,p.page_no,p.bbox,p.locator_json,a.source_name,a.subject_key,a.course_id,NULL AS score "
+            f"FROM SourcePassage p JOIN SourceArtifact a ON a.source_artifact_id=p.source_artifact_id WHERE ({clauses})" + subject_clause + course_clause + " ORDER BY p.source_artifact_id,p.ordinal",
+            tuple(value for term in (like_terms or [query]) for value in (f"%{term}%", f"%{term}%")) + tuple(subject_args) + tuple(course_args),
         ) if clauses else []
         rows = [*fts_rows, *like_rows]
         allowed = {primary_subject, None, *related} if primary_subject else None
+        allowed_courses = {primary_course_id, None, *related_courses} if primary_course_id else None
         result, seen = [], set()
         for row in rows:
             item = dict(row); subject = item.get("subject_key")
             if allowed is not None and subject not in allowed:
+                continue
+            if allowed_courses is not None and item.get("course_id") not in allowed_courses:
                 continue
             item["locator"] = loads(item.get("locator_json"), {}) or item.get("locator_json")
             item["score"] = item.get("score")
@@ -2223,7 +2234,7 @@ class Store:
         primary_subject = draft.get("subject_key") if draft.get("subject_key") in SUBJECT_KEYS else row["subject_key"]
         query_text = self.compose_retrieval_query(draft, query=as_text(draft.get("raw_analysis")))
         related = self._light_cross_subjects(primary_subject)
-        retrieved = self.retrieve(query_text, primary_subject=primary_subject, related_subjects=related, limit=8) if query_text else []
+        retrieved = self.retrieve(query_text, primary_subject=primary_subject, related_subjects=related, primary_course_id=row["course_id"], limit=8) if query_text else []
         source_refs = [{"source_passage_id": item.get("source_passage_id"), "source_artifact_id": item.get("source_artifact_id"), "source_name": item.get("source_name"), "page_no": item.get("page_no"), "bbox": item.get("bbox"), "locator": item.get("locator")} for item in retrieved]
         context = "\n\n".join(f"[S{index}] {item.get('source_name') or item.get('source_artifact_id') or '资料'} / 第{item.get('page_no') or '--'}页 / {item.get('locator') or '--'}\n{item.get('text') or ''}" for index, item in enumerate(retrieved, 1))
         draft.update({"retrieval_query": query_text, "retrieval_status": "ready" if retrieved else "empty", "retrieved_context": context, "source_refs": source_refs, "tag_candidates": self._tag_candidates(draft, retrieved, primary_subject), "grounding_label": "有资料依据" if retrieved else "未定位资料"})
@@ -2281,7 +2292,7 @@ class Store:
         candidates, seen = [], set()
         if query:
             primary_subject = draft.get("subject_key") if draft.get("subject_key") in SUBJECT_KEYS else row["subject_key"]
-            fts_rows = self.retrieve(query, primary_subject=primary_subject, related_subjects=self._light_cross_subjects(primary_subject), limit=8)
+            fts_rows = self.retrieve(query, primary_subject=primary_subject, related_subjects=self._light_cross_subjects(primary_subject), primary_course_id=row["course_id"], limit=8)
             for item in fts_rows[:8]:
                 key = item.get("source_passage_id")
                 if key in seen: continue
@@ -2813,6 +2824,7 @@ class Store:
         question_id = None
         question_text = ""
         primary_subject = None
+        primary_course_id = None
         grading = {}
         linked = []
         if requested_question_id:
@@ -2825,6 +2837,7 @@ class Store:
                 question_text = "\n".join(as_text(as_dict(block).get("content")) for block in as_list(presentation.get("blocks")))
                 grading = as_dict(loads(revision["grading_reference_fixture_snapshot"], {})) if revision else {}
                 primary_subject = grading.get("subject_key") if grading.get("subject_key") in SUBJECT_KEYS else None
+                primary_course_id = as_text(grading.get("course_id")).strip() or None
                 linked = self.get_question_sources(question_id)
 
         retrieval_query = self.compose_retrieval_query({
@@ -2842,7 +2855,7 @@ class Store:
             if passage_id and passage_id not in seen:
                 seen.add(passage_id)
                 selected.append(dict(row))
-        for row in self.retrieve(retrieval_query, primary_subject=primary_subject, related_subjects=self._light_cross_subjects(primary_subject)):
+        for row in self.retrieve(retrieval_query, primary_subject=primary_subject, related_subjects=self._light_cross_subjects(primary_subject), primary_course_id=primary_course_id):
             passage_id = row.get("source_passage_id")
             if passage_id and passage_id not in seen:
                 seen.add(passage_id)
