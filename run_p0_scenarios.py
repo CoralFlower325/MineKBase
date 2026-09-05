@@ -314,8 +314,10 @@ def run_wrong_course_filter_smoke():
                 store.create_course({"course_group": "电子类考研", "course_name": "信号与系统", "subject_key": "professional"}),
                 store.create_course({"course_group": "电子类考研", "course_name": "数字电路", "subject_key": "professional"}),
             ]
+            intakes = []
             for index, course in enumerate(courses, start=1):
                 intake = store.create_intake_batch([], course_id=course["course_id"])
+                intakes.append(intake)
                 store.patch_intake(intake["intake_id"], {"draft_fields": {
                     "analysis_status": "draft",
                     "question_text": f"课程隔离测试题 {index}",
@@ -325,6 +327,9 @@ def run_wrong_course_filter_smoke():
                     "knowledge_point": "测试知识点",
                 }})
                 assert store.confirm_intake(intake["intake_id"])["confirmed"]
+            resolved = store.resolve_intake(intakes[0]["intake_id"])
+            question_candidates = [item for item in resolved["draft_fields"].get("match_candidates", []) if item.get("kind") == "question"]
+            assert question_candidates and all(item.get("grading", {}).get("course_id") in {None, courses[0]["course_id"]} for item in question_candidates)
             all_rows = store.list_wrong_questions()
             filtered = store.list_wrong_questions({"course_id": courses[0]["course_id"]})
             assert len(all_rows) == 2 and len(filtered) == 1

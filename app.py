@@ -2255,17 +2255,17 @@ class Store:
             fragments = list(dict.fromkeys(fragments))[:8] or [query[:30]]
             like_clauses = " OR ".join("qr.question_units LIKE ? OR qr.grading_reference_fixture_snapshot LIKE ?" for _ in fragments)
             like_args = tuple(arg for fragment in fragments for arg in (f"%{fragment}%", f"%{fragment}%"))
-            qrows = self.all("SELECT q.question_id,qr.question_revision_id,qr.question_units,qr.grading_reference_fixture_snapshot FROM Question q JOIN QuestionRevision qr ON qr.question_revision_id=q.current_question_revision_id WHERE qr.revision_state='confirmed' AND (" + like_clauses + ") ORDER BY q.created_at DESC LIMIT 8", like_args)
+            course_clause = " AND qr.grading_reference_fixture_snapshot LIKE ?" if row["course_id"] else ""
+            course_args = [f'%"course_id":"{row["course_id"]}"%'] if row["course_id"] else []
+            qrows = self.all("SELECT q.question_id,qr.question_revision_id,qr.question_units,qr.grading_reference_fixture_snapshot FROM Question q JOIN QuestionRevision qr ON qr.question_revision_id=q.current_question_revision_id WHERE qr.revision_state='confirmed' AND (" + like_clauses + ")" + course_clause + " ORDER BY q.created_at DESC LIMIT 8", [*like_args, *course_args])
             for item in qrows:
                 key = item["question_id"]
                 if key in seen: continue
                 seen.add(key)
                 units = loads(item["question_units"], {})
                 grading = loads(item["grading_reference_fixture_snapshot"], {})
-                if row["course_id"] and as_text(grading.get("course_id")) not in {"", row["course_id"]}:
-                    continue
                 question_text = units[0].get("question_text", "") if isinstance(units, list) and units and isinstance(units[0], dict) else units.get("question_text", "") if isinstance(units, dict) else ""
-                candidates.append({"kind":"question", "question_id":key, "question_revision_id":item["question_revision_id"], "question_text":question_text, "grading":{"reference_answer":as_text(grading.get("reference_answer"))}})
+                candidates.append({"kind":"question", "question_id":key, "question_revision_id":item["question_revision_id"], "question_text":question_text, "grading":{"course_id":as_text(grading.get("course_id")), "reference_answer":as_text(grading.get("reference_answer"))}})
             bank_filters = {"course_id": row["course_id"], "limit": 30} if row["course_id"] else {}
             bank_rows = self.list_question_bank(bank_filters) if bank_filters else []
             fragments = [fragment.lower() for fragment in fragments if len(fragment) >= 2]
