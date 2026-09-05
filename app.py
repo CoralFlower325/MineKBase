@@ -629,18 +629,36 @@ class Store:
             result.append(item)
         return result
 
-    def similar_question_bank(self, question_id, limit=12):
+    def similar_question_bank(self, question_id, filters=None, limit=12):
         item = self._wrong_dto(question_id)
         if not item:
             raise DomainError("not_found", "wrong question not found", {"question_id": question_id})
         grading = as_dict(item.get("grading"))
+        filters = as_dict(filters)
         values = {key: as_text(grading.get(key)).strip() for key in ("course_id", "chapter", "question_type", "difficulty")}
         node_id = as_text(grading.get("knowledge_node_id")).strip()
+        explicit = {}
+        for key in ("chapter", "question_type", "difficulty"):
+            value = as_text(filters.get(key)).strip()
+            if value:
+                values[key] = value
+                explicit[key] = value
+        requested_node = as_text(filters.get("knowledge_node_id")).strip()
+        if requested_node:
+            node = self.one("SELECT course_id FROM KnowledgeNode WHERE knowledge_node_id=? AND confirmation_state!='archived'", (requested_node,))
+            if not node or node["course_id"] != values["course_id"]:
+                raise DomainError("invalid_knowledge_node", "knowledge node is not in the question course", {"knowledge_node_id": requested_node})
+            node_id = requested_node
+            explicit["knowledge_node_id"] = requested_node
         candidates = self.list_question_bank({"course_id": values["course_id"], "limit": limit * 4}) if values["course_id"] else []
         scored = []
         for candidate in candidates:
             if candidate["question_bank_item_id"] == question_id:
                 continue
+            if explicit.get("knowledge_node_id") and candidate.get("knowledge_node_id") != explicit["knowledge_node_id"]: continue
+            if explicit.get("chapter") and candidate.get("chapter") != explicit["chapter"]: continue
+            if explicit.get("question_type") and candidate.get("question_type") != explicit["question_type"]: continue
+            if explicit.get("difficulty") and candidate.get("difficulty") != explicit["difficulty"]: continue
             score = 0
             if node_id and candidate.get("knowledge_node_id") == node_id: score += 8
             if values["chapter"] and candidate.get("chapter") == values["chapter"]: score += 4
@@ -3565,7 +3583,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, {"data": self.store.get_attempt(path.rsplit("/", 1)[1])})
             if path.startswith("/api/wrong-questions/") and path.endswith("/similar"):
                 question_id = path[len("/api/wrong-questions/"):-len("/similar")].strip("/")
-                return self._json(200, {"data": self.store.similar_question_bank(question_id)})
+                query = parse_qs(urlparse(self.path).query, keep_blank_values=True)
+                filters = {key: values[0] for key, values in query.items() if values and values[0]}
+                return self._json(200, {"data": self.store.similar_question_bank(question_id, filters)})
             if path.startswith("/api/wrong-questions/"):
                 return self._json(200, {"data": self.store.get_wrong_question(path.rsplit("/", 1)[1])})
             if path.startswith("/api/intake/"):
@@ -3673,7 +3693,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, {"data": self.store.start_question_bank_item(item_id)})
             if path.startswith("/api/wrong-questions/") and path.endswith("/similar"):
                 question_id = path[len("/api/wrong-questions/"):-len("/similar")].strip("/")
-                return self._json(200, {"data": self.store.similar_question_bank(question_id)})
+                return self._json(200, {"data": self.store.similar_question_bank(question_id, payload)})
             if path.startswith("/api/wrong-questions/") and path.endswith("/redo"):
                 question_id = path[len("/api/wrong-questions/"):-len("/redo")].strip("/")
                 return self._json(200, {"data": self.store.redo_upload(question_id, [], payload)})

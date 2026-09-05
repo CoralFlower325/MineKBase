@@ -171,10 +171,12 @@ def run_question_bank_smoke():
             updated_item = store.update_question_bank_item(imported["question_bank_item_ids"][0], {"question_text": "同知识点相似题（已维护）", "options": "A. 正确|B. 错误", "reference_answer": "A"})
             bulk = store.bulk_update_question_bank({"items": [{"question_bank_item_id": imported["question_bank_item_ids"][1], "explanation": "补充说明"}]})
             similar = store.similar_question_bank(confirmed["question_id"])
+            strict_similar = store.similar_question_bank(confirmed["question_id"], {"knowledge_node_id": node["knowledge_node_id"], "question_type": "选择题", "difficulty": "中"})
             assert imported["imported"] == 2
             assert "已维护" in updated_item["question_text"] and updated_item["options"]["A"] == "正确" and bulk["updated"] == 1
             assert similar and "已维护" in similar[0]["question_text"]
             assert similar[0]["match_score"] > similar[1]["match_score"]
+            assert len(strict_similar) == 1 and "已维护" in strict_similar[0]["question_text"]
             filtered = store.list_question_bank({"course_id": course["course_id"], "knowledge_node_id": node["knowledge_node_id"]})
             assert len(filtered) == 1 and "已维护" in filtered[0]["question_text"]
             answer_intake = store.create_intake_batch([{"filename": "reference.png", "mime": "image/png", "data": b"reference", "role": "reference"}], course_id=course["course_id"])
