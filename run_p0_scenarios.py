@@ -234,10 +234,13 @@ def run_question_bank_smoke():
                 "error_reason": "答案来源测试",
                 "error_breakpoint": "首次检查答案时",
             }})
-            store.patch_intake(manual_answer_intake["intake_id"], {"draft_fields": {"reference_answer": "用户手写参考解"}})
+            store.patch_intake(manual_answer_intake["intake_id"], {"draft_fields": {
+                "reference_answer": "用户选择题库参考解",
+                "field_sources": {"reference_answer": "用户选择·题库"},
+            }})
             manual_detail = store._intake_detail(manual_answer_intake["intake_id"])
             assert manual_detail["draft_fields"]["answer_origin"] == "user_edit"
-            assert manual_detail["draft_fields"]["field_sources"]["reference_answer"] == "用户修改"
+            assert manual_detail["draft_fields"]["field_sources"]["reference_answer"] == "用户选择·题库"
             manual_confirmed = store.confirm_intake(manual_answer_intake["intake_id"])
             manual_grading = store.one("SELECT grading_reference_fixture_snapshot FROM QuestionRevision WHERE question_id=?", (manual_confirmed["question_id"],))
             assert app.loads(manual_grading[0], {})["answer_origin"] == "user_edit"

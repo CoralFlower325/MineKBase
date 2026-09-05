@@ -1360,7 +1360,7 @@ class Store:
                 draft.update(incoming_fields)
                 if field_sources:
                     draft["field_sources"] = field_sources
-                if "reference_answer" in incoming_fields and field_sources.get("reference_answer", "").startswith("用户修改"):
+                if "reference_answer" in incoming_fields and field_sources.get("reference_answer", "").startswith(("用户修改", "用户选择")):
                     draft["answer_origin"] = "user_edit"
                 if confirmed and "subject_key" in payload["draft_fields"]:
                     subject_value = payload["draft_fields"].get("subject_key") or None
@@ -2356,7 +2356,7 @@ class Store:
         answer_source_marker = as_text(as_dict(draft.get("field_sources")).get("reference_answer"))
         manual_answer = answer_source_marker.startswith(("用户修改", "用户选择"))
         current_origin = as_text(draft.get("answer_origin"))
-        answer_origin = "user_edit" if answer_source_marker.startswith("用户修改") else current_origin if manual_answer and current_origin else (answer_candidates[0]["origin"] if answer_candidates else "model")
+        answer_origin = "user_edit" if answer_source_marker.startswith(("用户修改", "用户选择")) else current_origin if manual_answer and current_origin else (answer_candidates[0]["origin"] if answer_candidates else "model")
         draft.update({"retrieval_query": query, "resolution_kind":"matched" if has_question else "model", "resolution_label":"匹配题目" if has_question else "资料参考" if has_source else "待补充", "match_candidates":candidates, "source_refs":source_refs, "tag_candidates":tag_candidates, "knowledge_node_candidates":knowledge_candidates, "answer_candidates":answer_candidates, "answer_conflict":len(answer_candidates) > 1, "answer_origin":answer_origin})
         self.begin()
         try:
