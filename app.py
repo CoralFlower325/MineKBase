@@ -444,6 +444,75 @@ class Store:
         args.append(max(1, min(int(filters.get("limit", 100)), 500)))
         return [self._question_bank_item_dto(row) for row in self.all(query, args)]
 
+    def _update_question_bank_item_in_tx(self, question_bank_item_id, payload):
+        payload = as_dict(payload)
+        row = self.one("SELECT * FROM QuestionBankItem WHERE question_bank_item_id=?", (question_bank_item_id,))
+        if not row:
+            raise DomainError("not_found", "question bank item not found", {"question_bank_item_id": question_bank_item_id})
+        if "course_id" in payload and as_text(payload.get("course_id")).strip() not in {"", row["course_id"]}:
+            raise DomainError("course_change_forbidden", "题库题目不能在维护时更换课程")
+        course_id = row["course_id"]
+        node_id = as_text(payload.get("knowledge_node_id", row["knowledge_node_id"])).strip() or None
+        if node_id:
+            node = self.one("SELECT course_id,confirmation_state FROM KnowledgeNode WHERE knowledge_node_id=?", (node_id,))
+            if not node or node["course_id"] != course_id or node["confirmation_state"] == "archived":
+                raise DomainError("invalid_knowledge_node", "知识节点不存在或不属于当前课程", {"knowledge_node_id": node_id})
+        values = {key: payload[key] for key in ("question_text", "image_path", "chapter", "question_type", "difficulty", "reference_answer", "explanation", "source", "year") if key in payload}
+        question_text = as_text(values.get("question_text", row["question_text"])).strip()
+        image_path = as_text(values.get("image_path", row["image_path"])).strip()
+        if not question_text and not image_path:
+            raise DomainError("missing_question", "题面文字和图片路径至少填写一项")
+        raw_payload = loads(row["raw_payload"], {})
+        if not isinstance(raw_payload, dict):
+            raw_payload = {}
+        raw_payload.update(payload)
+        if "options" in payload:
+            raw_payload["options"] = payload.get("options")
+        updated = {
+            "question_text": question_text,
+            "image_path": image_path or None,
+            "chapter": as_text(values.get("chapter", row["chapter"])).strip() or None,
+            "knowledge_node_id": node_id,
+            "question_type": as_text(values.get("question_type", row["question_type"])).strip() or None,
+            "difficulty": as_text(values.get("difficulty", row["difficulty"])).strip() or None,
+            "reference_answer": as_text(values.get("reference_answer", row["reference_answer"])),
+            "explanation": as_text(values.get("explanation", row["explanation"])),
+            "source": as_text(values.get("source", row["source"])),
+            "year": as_text(values.get("year", row["year"])),
+        }
+        self.conn.execute("UPDATE QuestionBankItem SET question_text=?,image_path=?,chapter=?,knowledge_node_id=?,question_type=?,difficulty=?,reference_answer=?,explanation=?,source=?,year=?,raw_payload=? WHERE question_bank_item_id=?", (*updated.values(), dumps(raw_payload), question_bank_item_id))
+        return self._question_bank_item_dto(self.one("SELECT * FROM QuestionBankItem WHERE question_bank_item_id=?", (question_bank_item_id,)))
+
+    def update_question_bank_item(self, question_bank_item_id, payload):
+        self.begin()
+        try:
+            result = self._update_question_bank_item_in_tx(question_bank_item_id, payload)
+            self.commit()
+            return result
+        except Exception:
+            self.rollback()
+            raise
+
+    def bulk_update_question_bank(self, payload):
+        payload = as_dict(payload)
+        items = payload.get("items") if isinstance(payload.get("items"), list) else []
+        if not items:
+            raise DomainError("invalid_question_bank", "items is required")
+        updated = []
+        self.begin()
+        try:
+            for item in items:
+                item = as_dict(item)
+                item_id = as_text(item.pop("question_bank_item_id", "")).strip()
+                if not item_id:
+                    raise DomainError("invalid_question_bank", "each update needs question_bank_item_id")
+                updated.append(self._update_question_bank_item_in_tx(item_id, item))
+            self.commit()
+            return {"updated": len(updated), "items": updated}
+        except Exception:
+            self.rollback()
+            raise
+
     def _question_bank_item_dto(self, row):
         item = dict(row)
         raw = loads(item.get("raw_payload"), {})
@@ -3518,6 +3587,15 @@ class Handler(BaseHTTPRequestHandler):
                 length = int(self.headers.get("Content-Length", 0))
                 payload = loads(self.rfile.read(length) or b"{}", {})
                 return self._json(200, {"data": self.store.patch_model_settings(payload)})
+            if path == "/api/question-bank":
+                length = int(self.headers.get("Content-Length", 0))
+                payload = loads(self.rfile.read(length) or b"{}", {})
+                return self._json(200, {"data": self.store.bulk_update_question_bank(payload)})
+            if path.startswith("/api/question-bank/"):
+                length = int(self.headers.get("Content-Length", 0))
+                payload = loads(self.rfile.read(length) or b"{}", {})
+                item_id = path[len("/api/question-bank/"):].strip("/")
+                return self._json(200, {"data": self.store.update_question_bank_item(item_id, payload)})
             if path.startswith("/api/attempts/"):
                 length = int(self.headers.get("Content-Length", 0))
                 payload = loads(self.rfile.read(length) or b"{}", {})

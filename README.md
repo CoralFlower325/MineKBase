@@ -8,7 +8,7 @@
 
 当前产品主线是数学一、408、可自定义的电子类专业课，以及独立的政治选择题库。首次启动会提供数学一、408、信号与系统、政治四个默认课程，首页“新建专业课”或 `GET/POST /api/courses` 都可以创建自定义课程。课程选择会随题目和资料保存，旧 `subject_key` 仍作为兼容字段保留。
 
-个人知识节点可以通过 `GET/POST /api/knowledge-nodes` 按课程创建和查看；已确认题目可绑定同课程节点。题库第一版支持 JSON API 或 multipart CSV/JSON 导入：先调用 `POST /api/question-bank/preview` 逐行校验，再调用 `POST /api/question-bank/import` 写入；相似题查询为 `GET /api/wrong-questions/:id/similar`，按课程、知识节点、章节、题型和难度做轻量筛选。相似题可以通过 `POST /api/question-bank/:id/start` 转成待确认练习草稿，只有确认后才进入正式错题本。政治题库行可携带 `options`、`reference_answer`、`explanation`，首页支持按章节加载政治选择题并通过 `POST /api/question-bank/:id/answer` 判断对错，错答记录可从 `GET /api/question-bank/attempts` 查询。错题诊断中的错误类型固定为“知识点不会 / 方法选择错误 / 推导或计算出错”，同时保留原因和首次错误步骤文本。当前仍缺题库批量编辑和独立练习结果统计。
+个人知识节点可以通过 `GET/POST /api/knowledge-nodes` 按课程创建和查看；已确认题目可绑定同课程节点。题库第一版支持 JSON API 或 multipart CSV/JSON 导入：先调用 `POST /api/question-bank/preview` 逐行校验，再调用 `POST /api/question-bank/import` 写入；首页维护列表和 `PATCH /api/question-bank/:id` 支持按课程逐题修正，`PATCH /api/question-bank` 支持批量更新，维护时不能更换课程。相似题查询为 `GET /api/wrong-questions/:id/similar`，按课程、知识节点、章节、题型和难度做轻量筛选。相似题可以通过 `POST /api/question-bank/:id/start` 转成待确认练习草稿，只有确认后才进入正式错题本。政治题库行可携带 `options`、`reference_answer`、`explanation`，首页支持按章节加载政治选择题并通过 `POST /api/question-bank/:id/answer` 判断对错，错答记录可从 `GET /api/question-bank/attempts` 查询。错题诊断中的错误类型固定为“知识点不会 / 方法选择错误 / 推导或计算出错”，同时保留原因和首次错误步骤文本。当前仍缺独立练习结果统计。
 
 政治题库的 JSON 行可以写成 `{"course_id":"course-politics","chapter":"马克思主义基本原理","question_text":"题面","options":{"A":"选项一","B":"选项二"},"reference_answer":"B","explanation":"解析"}`；CSV 的 `options` 列也支持 `A. 选项一|B. 选项二` 这种简写。
 
