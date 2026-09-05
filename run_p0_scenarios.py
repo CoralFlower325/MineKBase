@@ -215,7 +215,8 @@ def run_question_bank_smoke():
             assert generated_node and generated_node["confirmation_state"] == "candidate"
             generated_bank = store.one("SELECT knowledge_node_id FROM QuestionBankItem WHERE question_bank_item_id=?", (imported["question_bank_item_ids"][1],))
             assert generated_bank["knowledge_node_id"] == generated_node["knowledge_node_id"]
-            updated_item = store.update_question_bank_item(imported["question_bank_item_ids"][0], {"question_text": "同知识点相似题（已维护）", "options": "A. 正确|B. 错误", "reference_answer": "A"})
+            updated_item = store.update_question_bank_item(imported["question_bank_item_ids"][0], {"question_text": "同知识点相似题（已维护）", "options": "A. 正确|B. 错误", "reference_answer": "A", "source": "真题整理", "year": "2024"})
+            assert updated_item["source"] == "真题整理" and updated_item["year"] == "2024"
             bulk = store.bulk_update_question_bank({"items": [{"question_bank_item_id": imported["question_bank_item_ids"][1], "explanation": "补充说明"}]})
             similar = store.similar_question_bank(confirmed["question_id"])
             strict_similar = store.similar_question_bank(confirmed["question_id"], {"knowledge_node_id": node["knowledge_node_id"], "question_type": "选择题", "difficulty": "中"})
@@ -300,6 +301,7 @@ def run_question_bank_smoke():
             assert practice_grading["difficulty"] == "中"
             assert practice_grading["source_question_bank_item_id"] == filtered[0]["question_bank_item_id"]
             assert practice_grading["bank_explanation"] == "看状态转移"
+            assert practice_grading["bank_source"] == "真题整理" and practice_grading["bank_year"] == "2024"
             practice_task = store.one("SELECT * FROM ReviewTask WHERE question_id=? AND status='open'", (practice_confirmed["question_id"],))
             practice_attempt = store.one("SELECT * FROM Attempt WHERE question_id=? AND origin_kind='initial'", (practice_confirmed["question_id"],))
             assert practice_task and practice_task["reason_kind"] == "initial_error"
