@@ -326,8 +326,11 @@ def run_knowledge_candidate_smoke():
             passage_id = store.enrich_source(source["source_artifact_id"])["source_passage_ids"][0]
             store.patch_intake(intake["intake_id"], {"draft_fields": {"selected_source_passage_ids": [passage_id]}})
             assert store.get_question_sources(confirmed["question_id"])[0]["source_passage_id"] == passage_id
+            manual_source = store.capture_source({"source_name": "补充笔记", "course_id": course["course_id"], "raw_text": "手动关联的补充说明。"})
+            manual_passage_id = store.enrich_source(manual_source["source_artifact_id"])["source_passage_ids"][0]
+            store.link_question_source({"question_id": confirmed["question_id"], "source_passage_id": manual_passage_id, "origin": "manual"})
             store.patch_intake(intake["intake_id"], {"draft_fields": {"selected_source_passage_ids": []}})
-            assert store.get_question_sources(confirmed["question_id"])[0:] == []
+            assert [row["source_passage_id"] for row in store.get_question_sources(confirmed["question_id"])] == [manual_passage_id]
             return {"status": "passed", "knowledge_node_id": point["knowledge_node_id"]}
         finally:
             store.conn.close()
