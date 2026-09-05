@@ -73,8 +73,15 @@ def run_image_smoke():
             initial_assets = set(app.as_dict(app.loads(initial["response_snapshot"], {})).get("response_assets", []))
             task = store.one("SELECT review_task_id FROM ReviewTask WHERE question_id=? AND status='open'", (question_id,))
             session = store.start_review(task["review_task_id"])
+            review_view = store.get_review_question(question_id, task["review_task_id"])
+            assert review_view["question_id"] == question_id and review_view["assets"]
+            assert all(key not in review_view for key in ("grading", "reference_assets", "process_assets", "attempts", "answers", "sources"))
+            assert all("path" not in asset for asset in review_view["assets"])
             redo = store.redo_upload(question_id, [{"filename": "redo.png", "mime": "image/png", "data": b"redo-image"}], {"review_task_id": task["review_task_id"]})
             redo_asset_ids = [asset["asset_id"] for asset in redo["assets"]]
+            review_draft_view = store.get_review_question(question_id, task["review_task_id"])
+            assert review_draft_view["redo_draft"]["response_assets"] == redo_asset_ids
+            assert all(key not in review_draft_view for key in ("grading", "reference_assets", "process_assets", "attempts", "answers", "sources"))
             submitted = store.submit_attempt(redo["attempt_id"], {"response_assets": redo_asset_ids, "response_text": "redo"})
             assert submitted["status"] == "submitted" and submitted["comparison_draft"]["status"] == "failed"
             assert submitted["comparison_draft"]["error_type"] == "method_selection"

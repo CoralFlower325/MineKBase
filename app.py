@@ -2506,6 +2506,64 @@ class Store:
                 assets.append(item)
         return assets
 
+    def get_review_question(self, question_id, review_task_id=None):
+        """Return only the material allowed while a review is closed-book.
+
+        This intentionally does not call ``_wrong_dto``: that DTO contains
+        reference answers, prior attempts, sources, and diagnosis history.
+        The browser can use this response to render the current question and
+        continue an active redo without receiving those fields over HTTP.
+        """
+        question = self.one("SELECT * FROM Question WHERE question_id=?", (question_id,))
+        if not question:
+            raise DomainError("not_found", "wrong question not found", {"question_id": question_id})
+        revision = self.one("SELECT * FROM QuestionRevision WHERE question_revision_id=? AND revision_state='confirmed'", (question["current_question_revision_id"],))
+        if not revision:
+            raise DomainError("not_found", "confirmed question revision not found", {"question_id": question_id})
+        if review_task_id:
+            task = self.one("SELECT * FROM ReviewTask WHERE review_task_id=? AND question_id=?", (review_task_id, question_id))
+        else:
+            task = self.one("SELECT * FROM ReviewTask WHERE question_id=? AND status='open' ORDER BY due_at,review_round,created_at LIMIT 1", (question_id,))
+        if not task:
+            raise DomainError("not_found", "review task not found", {"question_id": question_id})
+        session = self.one("SELECT * FROM ReviewSession WHERE review_task_id=? AND question_id=? AND status='active' ORDER BY updated_at DESC LIMIT 1", (task["review_task_id"], question_id))
+        if not session:
+            raise DomainError("review_not_started", "review session is not active", {"review_task_id": task["review_task_id"]})
+        prompt = self.one("SELECT presentation_snapshot FROM ReviewPromptRevision WHERE review_prompt_revision_id=?", (revision["current_review_prompt_revision_id"],))
+        presentation = loads(prompt["presentation_snapshot"], {}) if prompt else {}
+        refs = presentation.get("asset_refs") if isinstance(presentation, dict) else []
+        assets, question_image_status = self._question_assets_from_refs(refs)
+        safe_assets = []
+        for asset in assets:
+            safe_assets.append({key: asset.get(key) for key in ("asset_id", "original_filename", "mime", "ordinal", "media_url", "review_role")})
+        grading = as_dict(loads(revision["grading_reference_fixture_snapshot"], {}))
+        raw_draft = as_dict(loads(session["draft_payload_snapshot"], {}))
+        redo_draft = None
+        draft_attempt_id = raw_draft.get("draft_attempt_id")
+        if draft_attempt_id:
+            draft_assets = self._redo_assets(grading.get("intake_id"), as_list(raw_draft.get("response_assets")))
+            redo_draft = {
+                "attempt_id": draft_attempt_id,
+                "review_session_id": session["review_session_id"],
+                "review_task_id": task["review_task_id"],
+                "response_text": as_text(raw_draft.get("response_text")),
+                "response_assets": [asset["asset_id"] for asset in draft_assets],
+                "assets": draft_assets,
+            }
+        course = self._course(grading.get("course_id"))
+        return {
+            "question_id": question_id,
+            "question_text": as_text(presentation.get("content")) if isinstance(presentation, dict) else "",
+            "assets": safe_assets,
+            "question_image_status": question_image_status,
+            "course_id": grading.get("course_id"),
+            "course_name": course["course_name"] if course else None,
+            "course_group": course["course_group"] if course else None,
+            "review_task_id": task["review_task_id"],
+            "review_session_id": session["review_session_id"],
+            "redo_draft": redo_draft,
+        }
+
     def _wrong_dto(self, question_id):
         question = self.one("SELECT * FROM Question WHERE question_id=?", (question_id,))
         if not question: return None
@@ -2708,7 +2766,7 @@ class Store:
 
     def _submitted_attempts(self, question_id):
         rows = self.all(
-            "SELECT * FROM Attempt WHERE question_id=? AND submission_state='submitted' ORDER BY submitted_at,created_at,attempt_id",
+            "SELECT * FROM Attempt WHERE question_id=? AND submission_state='submitted' ORDER BY CASE WHEN origin_kind='initial' THEN 0 ELSE 1 END, submitted_at,created_at,attempt_id",
             (question_id,),
         )
         return [self._attempt_dto(row) for row in rows]
@@ -3461,7 +3519,7 @@ class Store:
                 question_text = as_text(as_dict(units).get("question_text"))
             links = self.get_question_sources(row["question_id"])
             source_count += len(links)
-            attempts = self.all("SELECT attempt_id,origin_kind,submitted_at,completion_claim,response_snapshot FROM Attempt WHERE question_id=? AND submission_state='submitted' ORDER BY submitted_at", (row["question_id"],))
+            attempts = self.all("SELECT attempt_id,origin_kind,submitted_at,completion_claim,response_snapshot FROM Attempt WHERE question_id=? AND submission_state='submitted' ORDER BY CASE WHEN origin_kind='initial' THEN 0 ELSE 1 END, submitted_at,created_at,attempt_id", (row["question_id"],))
             attempt_items = []
             for attempt in attempts:
                 response = as_dict(loads(attempt["response_snapshot"], {}))
@@ -3827,6 +3885,11 @@ class Handler(BaseHTTPRequestHandler):
                 query = parse_qs(urlparse(self.path).query, keep_blank_values=True)
                 filters = {key: values[0] for key, values in query.items() if values}
                 return self._json(200, {"data": self.store.list_wrong_questions(filters)})
+            if path.startswith("/api/wrong-questions/") and path.endswith("/review"):
+                question_id = path[len("/api/wrong-questions/"):-len("/review")].strip("/")
+                query = parse_qs(urlparse(self.path).query, keep_blank_values=True)
+                review_task_id = query.get("review_task_id", [None])[0]
+                return self._json(200, {"data": self.store.get_review_question(question_id, review_task_id)})
             if path.startswith("/api/attempts/"):
                 return self._json(200, {"data": self.store.get_attempt(path.rsplit("/", 1)[1])})
             if path.startswith("/api/wrong-questions/") and path.endswith("/similar"):

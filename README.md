@@ -31,6 +31,7 @@
 - 错题详情会展开初次作答和已提交回测历史，保留每轮文字过程与过程图片；进入闭卷回测后不展示这些历史记录、参考答案或比较诊断，提交后再恢复查看。
 - 政治错答回顾会保留原题选项，支持从错答记录中直接再做一次；重做仍写入同一套客观判题记录并即时显示解析。
 - 回测队列会显示全部 open 任务并按到期优先排序，标出科目、轮次、原因和状态；点击队列行可直接打开对应错题并开始闭卷重做。
+- 闭卷重做使用专用的 `/api/wrong-questions/:id/review` 脱敏返回，只携带题面和当前草稿，不在网络响应中携带参考答案、历史 Attempt、历史过程图或比较诊断；提交后再读取完整错题详情。
 - `notify_due.py` 和配套 LaunchAgent 脚本已提供每日一次、隐私友好的到期任务合并提醒；通知进程只读 SQLite，不写任务或调用模型。
 - 资料与回答接入保持四件薄对象：`SourceArtifact`、`SourcePassage`、`QuestionSourceLink`、`Answer`；回答状态 `grounded/unlocated/unavailable` 是结果状态，不是流程门禁。
 - 资料收录支持浏览器 multipart PDF/PNG/JPG/DOCX 和普通静态网页 URL；上传文件原件立即保存到 `objects/sources/`，网页 URL 先写入 `SourceArtifact`，增强抓取成功后再保存 HTML 原件；增强复用 `SourcePassage`/FTS。文字 PDF 按页解析，扫描 PDF 的空文字页和直接上传的资料图片在增强时懒加载 PaddleOCR；OCR 依赖不可用时保留原文件并标记 unavailable。DOCX 使用懒加载的 `python-docx` 提取段落和表格单元格并保留 locator；网页抓取优先使用可选 trafilatura，缺失时回退标准库 HTMLParser，HTML 原文件保留且 passage locator 含 URL。OCR 只服务资料检索，不处理手写解题事实。图片错题分析会先读原图；有资料召回时再把带页码/locator 的候选交给二次分析，无召回或模型不可用时仍保留原文件和可编辑草稿。
