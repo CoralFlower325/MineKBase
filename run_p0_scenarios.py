@@ -395,6 +395,9 @@ def run_wrong_course_filter_smoke():
             assert len(all_rows) == 2 and len(filtered) == 1
             assert filtered[0]["course_id"] == courses[0]["course_id"]
             assert filtered[0]["question_text"] == "课程隔离测试题 1"
+            exported = store.export_wrong_questions(include_answers=False)
+            assert "- 课程：信号与系统（电子类考研）" in exported
+            assert "- 课程：数字电路（电子类考研）" in exported
             navigation = store.knowledge_navigation()
             assert len(navigation["subjects"]) == 2
             assert {item["course_id"] for item in navigation["subjects"]} == {course["course_id"] for course in courses}

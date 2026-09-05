@@ -3466,6 +3466,10 @@ class Store:
             grading = as_dict(detail.get("grading"))
             lines.extend([f"## {index}. {detail.get('question_text') or '待补题面'}", ""])
             lines.append(f"- 题目 ID：`{row['question_id']}`")
+            course_name = detail.get("course_name") or "未指定课程"
+            course_group = detail.get("course_group")
+            course_label = course_name if not course_group else f"{course_name}（{course_group}）"
+            lines.append(f"- 课程：{course_label}")
             lines.append(f"- 科目：{grading.get('subject_key') or '未分类'}")
             lines.append(f"- 章节：{grading.get('chapter') or '待补充'}")
             lines.append(f"- 知识点：{grading.get('knowledge_point') or '待补充'}")
