@@ -2756,11 +2756,13 @@ class Store:
             revision = self.one("SELECT * FROM QuestionRevision WHERE question_revision_id=?", (attempt["question_revision_id"],))
             grading = as_dict(loads(revision["grading_reference_fixture_snapshot"], {})) if revision else {}
         question = self.get_wrong_question(attempt["question_id"])
-        question_text = question.get("question_text")
+        prompt = self.one("SELECT presentation_snapshot FROM ReviewPromptRevision WHERE question_revision_id=? ORDER BY revision_no DESC LIMIT 1", (attempt["question_revision_id"],))
+        historical_presentation = loads(prompt["presentation_snapshot"], {}) if prompt else {}
+        question_text = as_text(historical_presentation.get("content")) or question.get("question_text")
         image_parts = []
         question_assets = [
             as_dict(ref).get("asset_id")
-            for ref in as_list(as_dict(question.get("presentation")).get("asset_refs"))
+            for ref in as_list(as_dict(historical_presentation).get("asset_refs"))
             if as_dict(ref).get("role") in ("question", "mixed")
         ]
         reference_assets = [
