@@ -2642,7 +2642,7 @@ class Store:
             comparison = current_response.get("comparison_draft")
             if not isinstance(comparison, dict):
                 raise DomainError("review_closed", "该 Attempt 不是可编辑的比较草稿", {"attempt_id": attempt_id})
-            for key in ("error_reason", "error_breakpoint", "correct_approach"):
+            for key in ("error_type", "error_reason", "error_breakpoint", "correct_approach"):
                 if key in payload:
                     comparison[key] = as_text(payload.get(key))
             comparison["status"] = comparison.get("status") or "draft"
@@ -2734,15 +2734,16 @@ class Store:
         assets = self._redo_assets(intake_id, as_list(draft.get("response_assets"))) if intake_id else []
         return {"attempt_id": as_text(draft.get("draft_attempt_id"), attempt_id), "question_id": session["question_id"], "review_task_id": session["review_task_id"], "review_session_id": session["review_session_id"], "status": "draft", "draft": {"response_text": as_text(draft.get("response_text")), "response_assets": [a["asset_id"] for a in assets], "assets": assets}}
 
-    def _comparison_prompt(self, question_text, initial_text, redo_text, reference_answer, error_reason, error_breakpoint):
+    def _comparison_prompt(self, question_text, initial_text, redo_text, reference_answer, error_type, error_reason, error_breakpoint):
         return "\n".join([
             "你是回测比较助手。请比较初次解题过程和本次重新作答，不修改正式错题卡。",
             "区分题目要求、初次过程、本次过程、参考答案和已有错误诊断。指出本次是否修正了初次偏离，并说明依据。",
-            "如果诊断不确定，请标记为‘待确认’，不要伪装成确定结论。只输出普通文本或 Markdown，可使用标题：错误原因、首次出错步骤、正确思路。",
+            "如果诊断不确定，请标记为‘待确认’，不要伪装成确定结论。错误类型只能从三项中选择：知识点不会、方法选择错误、推导或计算出错；只输出普通文本或 Markdown，可使用标题：错误类型、错误原因、首次出错步骤、正确思路。",
             f"题面：{question_text or '（未提供）'}",
             f"初次过程：{initial_text or '（无文字过程，可能只有图片）'}",
             f"本次过程：{redo_text or '（无文字过程，可能只有图片）'}",
             f"参考答案：{reference_answer or '待补充'}",
+            f"已有错误类型：{error_type or '待确认'}",
             f"已有错误原因：{error_reason or '待补充'}",
             f"已有首次出错步骤：{error_breakpoint or '待补充'}",
         ])
@@ -2785,7 +2786,7 @@ class Store:
                 image_parts.append((row["mime"] or "application/octet-stream", (ROOT / row["path"]).read_bytes()))
             except OSError:
                 continue
-        prompt = self._comparison_prompt(question_text, as_text(initial_response.get("response_text")), as_text(response.get("response_text")), as_text(grading.get("reference_answer")), as_text(grading.get("error_reason")), as_text(grading.get("error_breakpoint")))
+        prompt = self._comparison_prompt(question_text, as_text(initial_response.get("response_text")), as_text(response.get("response_text")), as_text(grading.get("reference_answer")), as_text(grading.get("error_type")), as_text(grading.get("error_reason")), as_text(grading.get("error_breakpoint")))
         errors, raw, provider = [], "", None
         for label, config in [("LLM", self._provider_config("LLM")), ("LLM_FALLBACK", self._provider_config("LLM_FALLBACK"))]:
             try:
@@ -2795,9 +2796,9 @@ class Store:
             except Exception as error:
                 errors.append(f"{label}: {error}")
         if not raw:
-            return {"status": "failed", "raw_analysis": "", "comparison_error": "；".join(errors)[:500] or "provider unavailable", "reference_answer": as_text(grading.get("reference_answer")), "error_reason": as_text(grading.get("error_reason")), "error_breakpoint": as_text(grading.get("error_breakpoint")), "correct_approach": "", "provider": provider}
+            return {"status": "failed", "raw_analysis": "", "comparison_error": "；".join(errors)[:500] or "provider unavailable", "reference_answer": as_text(grading.get("reference_answer")), "error_type": as_text(grading.get("error_type")), "error_reason": as_text(grading.get("error_reason")), "error_breakpoint": as_text(grading.get("error_breakpoint")), "correct_approach": "", "provider": provider}
         fields = self._extract_analysis(raw, grading.get("subject_key"))
-        return {"status": "draft", "raw_analysis": raw, "comparison_error": "", "reference_answer": as_text(grading.get("reference_answer")), "error_reason": as_text(fields.get("error_reason")) or as_text(grading.get("error_reason")), "error_breakpoint": as_text(fields.get("error_breakpoint")) or as_text(grading.get("error_breakpoint")), "correct_approach": as_text(fields.get("correct_approach")), "provider": provider}
+        return {"status": "draft", "raw_analysis": raw, "comparison_error": "", "reference_answer": as_text(grading.get("reference_answer")), "error_type": as_text(fields.get("error_type")) or as_text(grading.get("error_type")), "error_reason": as_text(fields.get("error_reason")) or as_text(grading.get("error_reason")), "error_breakpoint": as_text(fields.get("error_breakpoint")) or as_text(grading.get("error_breakpoint")), "correct_approach": as_text(fields.get("correct_approach")), "provider": provider}
 
     def submit_attempt(self, attempt_id, payload=None):
         payload = as_dict(payload)

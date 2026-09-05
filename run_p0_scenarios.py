@@ -72,6 +72,9 @@ def run_image_smoke():
             redo_asset_ids = [asset["asset_id"] for asset in redo["assets"]]
             submitted = store.submit_attempt(redo["attempt_id"], {"response_assets": redo_asset_ids, "response_text": "redo"})
             assert submitted["status"] == "submitted" and submitted["comparison_draft"]["status"] == "failed"
+            assert submitted["comparison_draft"]["error_type"] == "method_selection"
+            edited_comparison = store.patch_attempt_draft(submitted["attempt_id"], {"error_type": "derivation_calculation"})
+            assert edited_comparison["comparison_draft"]["error_type"] == "derivation_calculation"
             assert initial_assets == set(app.as_dict(app.loads(store.one("SELECT response_snapshot FROM Attempt WHERE question_id=? AND origin_kind='initial'", (question_id,))["response_snapshot"], {})).get("response_assets", []))
             return {"status": "passed", "question_id": question_id, "initial_assets": len(initial_assets), "comparison": submitted["comparison_draft"]["status"]}
         finally:
