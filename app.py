@@ -2365,13 +2365,16 @@ class Store:
         tag_candidates = self._tag_candidates(draft, [c for c in candidates if c.get("kind") == "source"], subject)
         has_question = any(c.get("kind")=="question" for c in candidates)
         has_source = any(c.get("kind")=="source" for c in candidates)
+        has_question_bank = any(c.get("kind")=="question_bank" for c in candidates)
         answer_candidates = self._answer_candidates(draft, row["batch_id"], candidates)
         knowledge_candidates = self._ensure_knowledge_candidates(row["course_id"], tag_candidates)
         answer_source_marker = as_text(as_dict(draft.get("field_sources")).get("reference_answer"))
         manual_answer = answer_source_marker.startswith(("用户修改", "用户选择"))
         current_origin = as_text(draft.get("answer_origin"))
         answer_origin = "user_edit" if answer_source_marker.startswith(("用户修改", "用户选择")) else current_origin if manual_answer and current_origin else (answer_candidates[0]["origin"] if answer_candidates else "model")
-        draft.update({"retrieval_query": query, "resolution_kind":"matched" if has_question else "model", "resolution_label":"匹配题目" if has_question else "资料参考" if has_source else "待补充", "match_candidates":candidates, "source_refs":source_refs, "tag_candidates":tag_candidates, "knowledge_node_candidates":knowledge_candidates, "answer_candidates":answer_candidates, "answer_conflict":len(answer_candidates) > 1, "answer_origin":answer_origin})
+        resolution_kind = "question_bank" if as_text(draft.get("candidate_origin")) == "question_bank" or (has_question_bank and not has_question) else "matched" if has_question else "model"
+        resolution_label = "题库练习候选" if resolution_kind == "question_bank" else "匹配题目" if has_question else "资料参考" if has_source else "待补充"
+        draft.update({"retrieval_query": query, "resolution_kind":resolution_kind, "resolution_label":resolution_label, "match_candidates":candidates, "source_refs":source_refs, "tag_candidates":tag_candidates, "knowledge_node_candidates":knowledge_candidates, "answer_candidates":answer_candidates, "answer_conflict":len(answer_candidates) > 1, "answer_origin":answer_origin})
         self.begin()
         try:
             self.conn.execute("UPDATE IntakeItem SET draft_fields=?,updated_at=? WHERE intake_id=?", (dumps(draft), self.clock(), intake_id)); self.commit()

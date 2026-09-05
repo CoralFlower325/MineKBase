@@ -268,6 +268,10 @@ def run_question_bank_smoke():
             before_questions = store.one("SELECT COUNT(*) AS count FROM Question")["count"]
             practice = store.start_question_bank_item(filtered[0]["question_bank_item_id"])
             practice_draft = practice["draft_fields"]
+            rerun_practice = store.resolve_intake(practice["intake_id"])["draft_fields"]
+            assert rerun_practice["resolution_kind"] == "question_bank"
+            rerun_bank_candidates = [item for item in rerun_practice["answer_candidates"] if item.get("origin") == "question_bank"]
+            assert rerun_bank_candidates and rerun_bank_candidates[0]["explanation"] == "看状态转移"
             assert practice_draft["candidate_origin"] == "question_bank"
             assert practice_draft["course_id"] == course["course_id"]
             assert practice_draft["knowledge_node_id"] == node["knowledge_node_id"]
