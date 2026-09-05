@@ -8,7 +8,7 @@
 
 当前产品主线是数学一、408 和可自定义的电子类专业课。首次启动会提供数学一、408、信号与系统三个默认课程，首页“新建专业课”或 `GET/POST /api/courses` 都可以创建自定义课程。课程选择会随题目和资料保存，旧 `subject_key` 仍作为兼容字段保留。
 
-个人知识节点可以通过 `GET/POST /api/knowledge-nodes` 按课程创建和查看；已确认题目可绑定同课程节点。题库第一版支持 JSON API 或 multipart CSV/JSON 导入：`POST /api/question-bank/import`，相似题查询为 `GET /api/wrong-questions/:id/similar`，按课程、知识节点、章节、题型和难度做轻量筛选；相似题可以通过 `POST /api/question-bank/:id/start` 转成待确认练习草稿，只有确认后才进入正式错题本。错题诊断中的错误类型固定为“知识点不会 / 方法选择错误 / 推导或计算出错”，同时保留原因和首次错误步骤文本。当前仍缺导入预览、错误行回报和独立练习结果统计。
+个人知识节点可以通过 `GET/POST /api/knowledge-nodes` 按课程创建和查看；已确认题目可绑定同课程节点。题库第一版支持 JSON API 或 multipart CSV/JSON 导入：先调用 `POST /api/question-bank/preview` 逐行校验，再调用 `POST /api/question-bank/import` 写入；相似题查询为 `GET /api/wrong-questions/:id/similar`，按课程、知识节点、章节、题型和难度做轻量筛选。相似题可以通过 `POST /api/question-bank/:id/start` 转成待确认练习草稿，只有确认后才进入正式错题本。错题诊断中的错误类型固定为“知识点不会 / 方法选择错误 / 推导或计算出错”，同时保留原因和首次错误步骤文本。当前仍缺题库批量编辑和独立练习结果统计。
 
 - 用 SQLite 保存课程、学习目标、题目版本、回测任务、会话、Attempt、Assessment 和 EvidenceEvent。
 - 通过本地 Web API 或首页完成：建立/查看任务、开始回测、保存/继续编辑草稿、查看提示、提交作答、补充评价。

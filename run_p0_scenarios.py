@@ -135,6 +135,13 @@ def run_question_bank_smoke():
         try:
             course = store.create_course({"course_group": "电子类考研", "course_name": "数字电路", "subject_key": "professional"})
             node = store.create_knowledge_node({"course_id": course["course_id"], "name": "时序逻辑"})
+            preview = store.preview_question_bank({"course_id": course["course_id"], "items": [{"question_text": "有效题"}, {"question_text": "", "reference_answer": "缺少题面"}]})
+            assert preview["ready_count"] == 1 and preview["error_count"] == 1 and not preview["valid"]
+            try:
+                store.import_question_bank({"course_id": course["course_id"], "items": [{"question_text": "", "reference_answer": "拒绝导入"}]})
+                raise AssertionError("invalid question bank row should be rejected")
+            except app.DomainError as error:
+                assert error.code == "invalid_question_bank" and error.details["error_count"] == 1
             intake = store.create_intake_batch([], course_id=course["course_id"])
             store.patch_intake(intake["intake_id"], {"draft_fields": {
                 "analysis_status": "draft",

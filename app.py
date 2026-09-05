@@ -326,6 +326,9 @@ class Store:
 
     def import_question_bank(self, payload):
         payload = as_dict(payload)
+        preview = self.preview_question_bank(payload)
+        if not preview["valid"]:
+            raise DomainError("invalid_question_bank", "题库存在无法导入的行", preview)
         rows = payload.get("items") if isinstance(payload.get("items"), list) else payload.get("rows")
         if not isinstance(rows, list):
             rows = [payload] if payload.get("course_id") else []
@@ -350,6 +353,46 @@ class Store:
         except Exception:
             self.rollback()
             raise
+
+    def preview_question_bank(self, payload):
+        """Validate imported rows without writing any QuestionBankItem."""
+        payload = as_dict(payload)
+        rows = payload.get("items") if isinstance(payload.get("items"), list) else payload.get("rows")
+        if not isinstance(rows, list):
+            rows = [payload] if payload.get("course_id") else []
+        previews = []
+        for index, raw in enumerate(rows, 1):
+            item = as_dict(raw)
+            course_id = as_text(item.get("course_id") or payload.get("course_id")).strip()
+            errors = []
+            course = self._course(course_id)
+            if not course:
+                errors.append({"field": "course_id", "code": "invalid_course", "message": "课程不存在或未指定"})
+            question_text = as_text(item.get("question_text")).strip()
+            image_path = as_text(item.get("image_path")).strip()
+            if not question_text and not image_path:
+                errors.append({"field": "question_text", "code": "missing_question", "message": "题面文字和图片路径至少填写一项"})
+            node_id = as_text(item.get("knowledge_node_id")).strip()
+            if node_id:
+                node = self.one("SELECT course_id,confirmation_state FROM KnowledgeNode WHERE knowledge_node_id=?", (node_id,))
+                if not node or node["confirmation_state"] == "archived" or node["course_id"] != course_id:
+                    errors.append({"field": "knowledge_node_id", "code": "invalid_knowledge_node", "message": "知识节点不存在或不属于所选课程"})
+            normalized = {
+                "question_bank_item_id": as_text(item.get("question_bank_item_id")).strip() or None,
+                "course_id": course_id,
+                "question_text": question_text,
+                "image_path": image_path or None,
+                "chapter": as_text(item.get("chapter")).strip() or None,
+                "knowledge_node_id": node_id or None,
+                "question_type": as_text(item.get("question_type")).strip() or None,
+                "difficulty": as_text(item.get("difficulty")).strip() or None,
+                "reference_answer": as_text(item.get("reference_answer")),
+                "explanation": as_text(item.get("explanation")),
+                "source": as_text(item.get("source")),
+                "year": as_text(item.get("year")),
+            }
+            previews.append({"row": index, "status": "error" if errors else "ready", "errors": errors, "item": normalized})
+        return {"valid": bool(previews) and not any(row["errors"] for row in previews), "rows": previews, "ready_count": sum(row["status"] == "ready" for row in previews), "error_count": sum(row["status"] == "error" for row in previews), "total": len(previews)}
 
     def list_question_bank(self, filters=None):
         filters = as_dict(filters)
@@ -3156,6 +3199,28 @@ class Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0))
         return loads(self.rfile.read(length) or b"{}", {})
 
+    def _question_bank_payload(self, payload):
+        """Parse JSON or multipart question-bank input once for preview/import."""
+        if not isinstance(payload, tuple):
+            return as_dict(payload)
+        values, files = payload
+        if not files:
+            raise DomainError("invalid_question_bank", "CSV or JSON file is required")
+        upload = files[0]
+        try:
+            raw = (upload.get("data") or b"").decode("utf-8-sig")
+            if (upload.get("filename") or "").lower().endswith(".json"):
+                parsed = json.loads(raw)
+                rows = parsed.get("items", parsed) if isinstance(parsed, dict) else parsed
+            else:
+                rows = list(csv.DictReader(io.StringIO(raw)))
+        except (UnicodeDecodeError, ValueError, csv.Error) as error:
+            raise DomainError("invalid_question_bank", f"cannot parse question bank: {error}")
+        if not isinstance(rows, list):
+            raise DomainError("invalid_question_bank", "question bank must contain a list of rows")
+        fallback_course = values.get("course_id") or None
+        return {"course_id": fallback_course, "items": [{**as_dict(row), **({"course_id": fallback_course} if fallback_course and not row.get("course_id") else {})} for row in rows]}
+
     def do_GET(self):
         try:
             path = urlparse(self.path).path
@@ -3260,6 +3325,11 @@ class Handler(BaseHTTPRequestHandler):
         try:
             path = urlparse(self.path).path
             payload = self._request_payload()
+            if path in {"/api/question-bank/preview", "/api/question-bank/import"}:
+                question_bank_payload = self._question_bank_payload(payload)
+                if path.endswith("/preview"):
+                    return self._json(200, {"data": self.store.preview_question_bank(question_bank_payload)})
+                return self._json(200, {"data": self.store.import_question_bank(question_bank_payload)})
             if isinstance(payload, tuple):
                 values, files = payload
                 if path == "/api/capture/source":
