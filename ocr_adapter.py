@@ -46,6 +46,24 @@ def _ocr_image(path: Path, page_no=None, engine=None):
     return rows
 
 
+def extract_images(items):
+    """OCR a batch of images with one lazily-created engine.
+
+    ``items`` may contain paths or ``(path, page_no)`` pairs.  The page number
+    is kept as the caller's image ordinal so downstream prompts can point back
+    to the original upload without treating OCR as the source of truth.
+    """
+    engine = _create_engine()
+    rows = []
+    for index, item in enumerate(items, 1):
+        if isinstance(item, (list, tuple)) and len(item) >= 2:
+            path, page_no = item[0], item[1]
+        else:
+            path, page_no = item, index
+        rows.extend(_ocr_image(Path(path), page_no=page_no, engine=engine))
+    return rows
+
+
 def extract_document(path: str | Path, kind="image", pages=None):
     """OCR one image or PDF, initializing one engine per document."""
     path = Path(path)

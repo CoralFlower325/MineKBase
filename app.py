@@ -2168,6 +2168,16 @@ class Store:
                 errors.append(f"{label}: {error}")
         return "", None, errors
 
+    def _extract_intake_ocr(self, assets):
+        """Return optional OCR clues for an image intake without blocking it."""
+        from ocr_adapter import extract_images
+        items = [(ROOT / asset["path"], asset["ordinal"]) for asset in assets if asset["role"] != "redo_process"]
+        rows = extract_images(items)
+        return [
+            {"text": as_text(row.get("text")).strip(), "page_no": row.get("page_no"), "bbox": row.get("bbox")}
+            for row in rows if as_text(row.get("text")).strip()
+        ]
+
     def _extract_analysis(self, raw, subject_hint=None):
         import re
         fields = {"question_text":"", "reference_answer":"", "subject_key": subject_hint if subject_hint in SUBJECT_KEYS else None, "chapter":"", "knowledge_point":"", "question_type":"", "error_type":"", "error_reason":"", "error_breakpoint":"", "correct_approach":""}
@@ -2290,6 +2300,24 @@ class Store:
             draft.update({"analysis_status":"failed", "analysis_error":error})
             self.begin(); self.conn.execute("UPDATE IntakeItem SET draft_fields=?,updated_at=? WHERE intake_id=?", (dumps(draft), self.clock(), intake_id)); self.commit()
             return self._intake_detail(intake_id)
+        ocr_rows, ocr_error = [], ""
+        try:
+            ocr_rows = self._extract_intake_ocr(assets)
+        except Exception as error:
+            ocr_error = str(error)
+        ocr_rows = ocr_rows[:200]
+        ocr_text = "\n".join(
+            f"图片 {row.get('page_no') or '--'}：{row.get('text')}"
+            for row in ocr_rows if row.get("text")
+        )[:12000]
+        draft.update({
+            "ocr_status": "ready" if ocr_rows else "unavailable" if ocr_error else "empty",
+            "ocr_text": ocr_text,
+            "ocr_blocks": ocr_rows,
+            "ocr_error": ocr_error[:500],
+        })
+        if ocr_text:
+            prompt_lines.append("以下是本地 OCR 从图片中提取的辅助文字，只能作为线索，必须回看原图核对；不要把 OCR 猜测直接当作事实：\n" + ocr_text)
         if not any(a["role"] == "reference" for a in assets): prompt_lines.append("没有标准答案图片，请根据题面和我的解题过程推导答案，并把推导结果标为模型答案。")
         prompt = "\n".join(prompt_lines)
         raw, provider_label, errors = self._invoke_with_fallback(prompt, image_parts)
@@ -2331,6 +2359,7 @@ class Store:
             second_prompt = "\n".join([
                 "请基于原始题目图片和以下资料候选，输出可编辑的错题分析草稿。先区分题面、我的解题步骤、标准答案/模型答案；逐步还原过程并指出首次偏离步骤。",
                 "给出错误原因、正确思路和科目/章节/知识点/题型候选。不确定内容标记‘待确认’，不要凭空制造出处或为了填满字段而猜测。资料编号只能作为参考。",
+                *(["本地 OCR 辅助文字（仅供核对，不能替代原图）：", ocr_text] if ocr_text else []),
                 "资料候选：", context,
             ])
             second_raw, _second_provider, second_errors = self._invoke_with_fallback(second_prompt, image_parts)

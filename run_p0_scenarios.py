@@ -34,8 +34,14 @@ def run_image_smoke():
                 {"asset_id": asset_ids[0], "ordinal": 2, "role": "my_process"},
                 {"asset_id": asset_ids[1], "ordinal": 1, "role": "question"},
             ]})
+            store._extract_intake_ocr = lambda _assets: [{"text": "OCR 题面线索", "page_no": 1, "bbox": [1, 2, 3, 4]}]
+            prompts = []
+            store._invoke_with_fallback = lambda prompt, _assets: (prompts.append(prompt) or ("", "", ["provider unavailable"]))
             failed = store.analyze_intake(intake["intake_id"])
             assert failed["draft_fields"]["analysis_status"] == "failed"
+            assert failed["draft_fields"]["ocr_status"] == "ready"
+            assert failed["draft_fields"]["ocr_text"] == "图片 1：OCR 题面线索"
+            assert prompts and "OCR 题面线索" in prompts[0] and "原图" in prompts[0]
             store.resolve_intake(intake["intake_id"])
             confirmed = store.confirm_intake(intake["intake_id"])
             assert confirmed["confirmed"] and confirmed["due_at"].startswith("2026-09-08")
