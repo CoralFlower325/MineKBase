@@ -469,7 +469,12 @@ def run_review_self_assessment_smoke():
             routed = store.session_action(first_session["review_session_id"], "self_assess", {"state": "dont_know"})
             assert routed["full_redo_requested"] is True
             assert routed["draft"]["self_assessment"] == "dont_know"
-            store.session_action(first_session["review_session_id"], "abandon", {"draft": routed["draft"]})
+            redo = store.redo_upload(first["question_id"], [{"filename": "redo.png", "mime": "image/png", "data": b"redo-image"}], {"review_task_id": first_task["review_task_id"]})
+            submitted = store.submit_attempt(redo["attempt_id"], {"response_assets": redo["draft"]["response_assets"]})
+            assert submitted["status"] == "submitted"
+            assert submitted["comparison_draft"]["status"] == "failed"
+            assert submitted["response_assets"][0]["role"] == "redo_process"
+            assert submitted["next_task"]["review_round"] == 2
 
             second = confirmed_question("会")
             second_task = store.one("SELECT review_task_id FROM ReviewTask WHERE question_id=? AND status='open'", (second["question_id"],))
