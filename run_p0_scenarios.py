@@ -249,6 +249,11 @@ def run_knowledge_candidate_smoke():
             state = store.one("SELECT confirmation_state FROM KnowledgeNode WHERE knowledge_node_id=?", (point["knowledge_node_id"],))[0]
             link = store.one("SELECT question_id FROM QuestionKnowledgeLink WHERE question_id=? AND knowledge_node_id=?", (confirmed["question_id"], point["knowledge_node_id"]))
             assert state == "confirmed" and link
+            replacement = store.create_knowledge_node({"course_id": course["course_id"], "name": "树的遍历方法"})
+            store.patch_intake(intake["intake_id"], {"draft_fields": {"knowledge_node_id": replacement["knowledge_node_id"], "knowledge_point": replacement["name"]}})
+            replacement_link = store.one("SELECT question_id FROM QuestionKnowledgeLink WHERE question_id=? AND knowledge_node_id=?", (confirmed["question_id"], replacement["knowledge_node_id"]))
+            old_link = store.one("SELECT question_id FROM QuestionKnowledgeLink WHERE question_id=? AND knowledge_node_id=?", (confirmed["question_id"], point["knowledge_node_id"]))
+            assert replacement_link and old_link is None
             return {"status": "passed", "knowledge_node_id": point["knowledge_node_id"]}
         finally:
             store.conn.close()

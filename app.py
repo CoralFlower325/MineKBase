@@ -1403,6 +1403,21 @@ class Store:
         if "subject_key" in draft:
             value = draft.get("subject_key")
             grading["subject_key"] = value if isinstance(value, str) and value in SUBJECT_KEYS else None
+        if "knowledge_node_id" in draft:
+            knowledge_node_id = as_text(draft.get("knowledge_node_id")).strip() or None
+            knowledge_node = self.one("SELECT knowledge_node_id,course_id,name,confirmation_state FROM KnowledgeNode WHERE knowledge_node_id=? AND confirmation_state!='archived'", (knowledge_node_id,)) if knowledge_node_id else None
+            if knowledge_node_id and not knowledge_node:
+                raise DomainError("invalid_knowledge_node", "knowledge node not found", {"knowledge_node_id": knowledge_node_id})
+            if knowledge_node and knowledge_node["course_id"] != grading.get("course_id"):
+                raise DomainError("invalid_knowledge_node", "knowledge node is not in the question course", {"knowledge_node_id": knowledge_node_id})
+            if knowledge_node and knowledge_node["confirmation_state"] == "candidate":
+                self.conn.execute("UPDATE KnowledgeNode SET confirmation_state='confirmed',origin='user' WHERE knowledge_node_id=?", (knowledge_node_id,))
+            grading["knowledge_node_id"] = knowledge_node_id
+            if knowledge_node:
+                grading["knowledge_point"] = knowledge_node["name"]
+            self.conn.execute("DELETE FROM QuestionKnowledgeLink WHERE question_id=?", (question_id,))
+            if knowledge_node:
+                self.conn.execute("INSERT INTO QuestionKnowledgeLink(question_id,knowledge_node_id,origin,created_at) VALUES(?,?,?,?)", (question_id, knowledge_node_id, "user", self.clock()))
         self.conn.execute("UPDATE QuestionRevision SET grading_reference_fixture_snapshot=? WHERE question_revision_id=?", (dumps(grading), revision["question_revision_id"]))
 
     def media_asset(self, asset_id):
