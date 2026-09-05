@@ -395,6 +395,13 @@ def run_wrong_course_filter_smoke():
                     "knowledge_point": "测试知识点",
                 }})
                 assert store.confirm_intake(intake["intake_id"])["confirmed"]
+            node = store.create_knowledge_node({"course_id": courses[0]["course_id"], "name": "原知识点", "confirmation_state": "confirmed"})
+            store.patch_intake(intakes[0]["intake_id"], {"draft_fields": {"knowledge_node_id": node["knowledge_node_id"], "knowledge_point": "原知识点"}})
+            renamed = store.update_knowledge_node(node["knowledge_node_id"], {"name": "改名知识点"})
+            assert renamed["name"] == "改名知识点"
+            renamed_detail = store.get_wrong_question(store.list_wrong_questions({"course_id": courses[0]["course_id"]})[0]["question_id"])
+            assert renamed_detail["grading"]["knowledge_point"] == "改名知识点"
+            assert store._intake_detail(intakes[0]["intake_id"])["draft_fields"]["knowledge_point"] == "改名知识点"
             resolved = store.resolve_intake(intakes[0]["intake_id"])
             question_candidates = [item for item in resolved["draft_fields"].get("match_candidates", []) if item.get("kind") == "question"]
             assert question_candidates and all(item.get("grading", {}).get("course_id") in {None, courses[0]["course_id"]} for item in question_candidates)

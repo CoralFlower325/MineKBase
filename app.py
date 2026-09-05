@@ -346,6 +346,22 @@ class Store:
         self.begin()
         try:
             self.conn.execute("UPDATE KnowledgeNode SET parent_id=?,name=?,aliases=?,origin=?,confirmation_state=? WHERE knowledge_node_id=?", (parent_id, name or row["name"], dumps(aliases), origin, state, knowledge_node_id))
+            if name and name != row["name"]:
+                linked = self.all("SELECT q.question_id,q.current_question_revision_id FROM QuestionKnowledgeLink l JOIN Question q ON q.question_id=l.question_id WHERE l.knowledge_node_id=?", (knowledge_node_id,))
+                for question in linked:
+                    revision = self.one("SELECT grading_reference_fixture_snapshot FROM QuestionRevision WHERE question_revision_id=? AND question_id=?", (question["current_question_revision_id"], question["question_id"]))
+                    grading = as_dict(loads(revision["grading_reference_fixture_snapshot"], {})) if revision else {}
+                    if grading.get("knowledge_node_id") != knowledge_node_id:
+                        continue
+                    grading["knowledge_point"] = name
+                    self.conn.execute("UPDATE QuestionRevision SET grading_reference_fixture_snapshot=? WHERE question_revision_id=?", (dumps(grading), question["current_question_revision_id"]))
+                    intake_id = as_text(grading.get("intake_id")).strip()
+                    if intake_id:
+                        intake = self.one("SELECT draft_fields FROM IntakeItem WHERE intake_id=?", (intake_id,))
+                        draft = as_dict(loads(intake["draft_fields"], {})) if intake else {}
+                        if draft.get("knowledge_node_id") == knowledge_node_id:
+                            draft["knowledge_point"] = name
+                            self.conn.execute("UPDATE IntakeItem SET draft_fields=?,updated_at=? WHERE intake_id=?", (dumps(draft), self.clock(), intake_id))
             updated = self.one("SELECT * FROM KnowledgeNode WHERE knowledge_node_id=?", (knowledge_node_id,))
             self.commit()
             return dict(updated)
