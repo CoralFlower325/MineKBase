@@ -3573,6 +3573,17 @@ class Handler(BaseHTTPRequestHandler):
                 values[field.name] = field.value
         return values, files
 
+    def _apply_upload_roles(self, values, files):
+        """Attach optional per-file roles sent by the image intake form."""
+        values = values if isinstance(values, dict) else {}
+        roles = loads(values.get("roles"), []) if isinstance(values.get("roles"), str) else values.get("roles", [])
+        if not isinstance(roles, list):
+            return files
+        for index, file in enumerate(files or []):
+            if index < len(roles) and isinstance(roles[index], str):
+                file["role"] = roles[index]
+        return files
+
     def _request_payload(self):
         content_type = self.headers.get("Content-Type", "")
         if content_type.lower().startswith("multipart/form-data"):
@@ -3722,7 +3733,7 @@ class Handler(BaseHTTPRequestHandler):
                 if path == "/api/capture/source":
                     return self._json(200, {"data": self.store.capture_source(values, files)})
                 if path == "/api/intake/batches":
-                    return self._json(200, {"data": self.store.create_intake_batch(files, values.get("subject_key") or None, values.get("course_id") or None)})
+                    return self._json(200, {"data": self.store.create_intake_batch(self._apply_upload_roles(values, files), values.get("subject_key") or None, values.get("course_id") or None)})
                 if path == "/api/question-bank/import":
                     if not files:
                         raise DomainError("invalid_question_bank", "CSV or JSON file is required")
@@ -3746,7 +3757,7 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json(200, {"data": self.store.redo_upload(question_id, files, values)})
                 if path.startswith("/api/intake/") and path.endswith("/assets"):
                     intake_id = path[len("/api/intake/"):-len("/assets")].strip("/")
-                    return self._json(200, {"data": self.store.append_intake_assets(intake_id, files)})
+                    return self._json(200, {"data": self.store.append_intake_assets(intake_id, self._apply_upload_roles(values, files))})
                 payload = values
             if path == "/api/intake/batches":
                 return self._json(200, {"data": self.store.create_intake_batch([], payload.get("subject_key"), payload.get("course_id"))})

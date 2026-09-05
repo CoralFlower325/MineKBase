@@ -17,6 +17,12 @@ def run_image_smoke():
         app.ROOT = root
         store = app.Store(root / "image.sqlite", lambda: "2026-09-05T00:00:00Z")
         try:
+            browser_files = [
+                {"filename": "browser-question.png", "mime": "image/png", "data": b"question-image"},
+                {"filename": "browser-process.png", "mime": "image/png", "data": b"process-image"},
+            ]
+            app.Handler._apply_upload_roles(None, {"roles": json.dumps(["question", "my_process"])}, browser_files)
+            assert [item["role"] for item in browser_files] == ["question", "my_process"]
             files = [
                 {"filename": "question.png", "mime": "image/png", "data": b"question-image", "role": "question"},
                 {"filename": "process.png", "mime": "image/png", "data": b"process-image", "role": "my_process"},
