@@ -363,6 +363,12 @@ def run_knowledge_candidate_smoke():
             assert bracket_candidates[0]["answer"] == "B"
             extracted = store._extract_analysis("首次出错步骤：第二步选择了错误的遍历方法\n错误类型：方法选择错误", "professional")
             assert extracted["error_breakpoint"] == "第二步选择了错误的遍历方法" and extracted["error_type"] == "method_selection"
+            formatted = store._extract_analysis("1. **题面**\n求极限\n2. **参考解**\n答案是 1\n3. **题型**\n极限计算\n4. **错误分析**\n方法选择错误\n5. **首次出错步骤**\n第二步", "math")
+            assert formatted["question_text"] == "求极限"
+            assert formatted["reference_answer"] == "答案是 1"
+            assert formatted["question_type"] == "极限计算"
+            assert formatted["error_reason"] == "方法选择错误"
+            assert formatted["error_breakpoint"] == "第二步"
             long_candidates = store._answer_candidates({}, intake["batch_id"], [{"kind": "source", "text": "长资料" * 500, "source_passage_id": "passage-long", "source_name": "长资料"}])
             assert long_candidates[0]["source_excerpted"] and "资料较长" in long_candidates[0]["answer"] and long_candidates[0]["source_text"]
             point = next(node for node in nodes if node["name"] == "二叉树遍历")

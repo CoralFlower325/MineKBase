@@ -2172,15 +2172,18 @@ class Store:
         import re
         fields = {"question_text":"", "reference_answer":"", "subject_key": subject_hint if subject_hint in SUBJECT_KEYS else None, "chapter":"", "knowledge_point":"", "question_type":"", "error_type":"", "error_reason":"", "error_breakpoint":"", "correct_approach":""}
         aliases = {
-            "question_text": r"(?:题面|题目(?:要求)?|question(?:_text)?)",
-            "reference_answer": r"(?:答案|标准答案|模型答案|参考答案|reference[_ ]?answer)",
-            "subject_key": r"(?:科目|subject[_ ]?key)", "chapter": r"(?:章节|chapter)", "knowledge_point": r"(?:知识点|knowledge[_ ]?point)", "question_type": r"(?:题型|question[_ ]?type)",
-            "error_type": r"(?:错误类型|error[_ ]?type)", "error_reason": r"(?:做错原因|错误原因|error[_ ]?reason)", "error_breakpoint": r"(?:解题断点|首次偏离|首次出错步骤|error[_ ]?breakpoint)", "correct_approach": r"(?:正确思路|correct[_ ]?approach)"
+            "question_text": r"(?:题面|原题|题目(?:要求)?|question(?:_text)?)",
+            "reference_answer": r"(?:答案|标准答案|模型答案|参考答案|参考解|reference[_ ]?answer)",
+            "subject_key": r"(?:科目|subject[_ ]?key)", "chapter": r"(?:章节|chapter)", "knowledge_point": r"(?:知识点|knowledge[_ ]?point)", "question_type": r"(?:题型|方法|question[_ ]?type)",
+            "error_type": r"(?:错误类型|error[_ ]?type)", "error_reason": r"(?:做错原因|错误原因|错误分析|error[_ ]?reason)", "error_breakpoint": r"(?:解题断点|首次偏离|首次出错步骤|error[_ ]?breakpoint)", "correct_approach": r"(?:正确思路|正确解法|解题方法|correct[_ ]?approach)"
         }
         # Models commonly use either "标题：内容" or a Markdown heading followed
         # by content on the next line. Parse line starts only, and keep raw_analysis
         # as the lossless fallback when a section is still ambiguous.
-        heading_prefix = r"(?:\*\*)?(?:#{1,6}[ \t]*|[-*][ \t]+)?(?:\*\*)?"
+        # Vision models often number sections or wrap labels in Markdown
+        # emphasis. Accept those presentation variations while still
+        # requiring a label at the beginning of its own line.
+        heading_prefix = r"(?:\*\*)?(?:(?:#{1,6}[ \t]*|[-*][ \t]+|\d+[.)、][ \t]+))?(?:\*\*)?"
         subject_aliases = {
             "math": ("math", "数学", "高数"),
             "english": ("english", "英语"),
