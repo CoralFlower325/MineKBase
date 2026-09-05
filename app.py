@@ -3424,6 +3424,8 @@ class Store:
         for row in rows:
             grading = as_dict(loads(row["grading_reference_fixture_snapshot"], {}))
             question_id = row["question_id"]
+            course_id = as_text(grading.get("course_id")).strip() or None
+            course = self._course(course_id) if course_id else None
             units = loads(row["question_units"], [])
             question_text = as_text(units[0].get("question_text")) if isinstance(units, list) and units and isinstance(units[0], dict) else as_text(as_dict(units).get("question_text"))
             for kind, key in (("错误原因", "error_reason"), ("首次断点", "error_breakpoint")):
@@ -3431,7 +3433,9 @@ class Store:
                 if not label or label == "待补充":
                     continue
                 label = label.splitlines()[0][:120]
-                entry = aggregates[(kind, label)]
+                entry = aggregates[(course_id, kind, label)]
+                entry.setdefault("course_id", course_id)
+                entry.setdefault("course_name", course["course_name"] if course else None)
                 entry["count"] += 1
                 if question_id not in entry["question_ids"]:
                     entry["question_ids"].append(question_id)
@@ -3439,14 +3443,16 @@ class Store:
                     entry["examples"].append({"question_id": question_id, "question_text": question_text or "待补题面"})
             incomplete = self.one("SELECT COUNT(*) AS count FROM Attempt WHERE question_id=? AND submission_state='submitted' AND completion_claim!='complete'", (question_id,))["count"]
             if incomplete:
-                entry = aggregates[("过程不完整", "过程不完整")]
+                entry = aggregates[(course_id, "过程不完整", "过程不完整")]
+                entry.setdefault("course_id", course_id)
+                entry.setdefault("course_name", course["course_name"] if course else None)
                 entry["count"] += incomplete
                 if question_id not in entry["question_ids"]:
                     entry["question_ids"].append(question_id)
         result = []
-        for (kind, label), item in aggregates.items():
+        for (_course_id, kind, label), item in aggregates.items():
             result.append({"kind": kind, "label": label, **item})
-        result.sort(key=lambda item: (-item["count"], item["kind"], item["label"]))
+        result.sort(key=lambda item: (-item["count"], item.get("course_name") or "", item["kind"], item["label"]))
         return result
 
     def export_wrong_questions(self, question_ids=None, include_answers=True):

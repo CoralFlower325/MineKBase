@@ -382,6 +382,7 @@ def run_wrong_course_filter_smoke():
                     "question_text": f"课程隔离测试题 {index}",
                     "reference_answer": "参考解",
                     "error_type": "knowledge_gap",
+                    "error_reason": "概念混淆",
                     "chapter": "测试章节",
                     "knowledge_point": "测试知识点",
                 }})
@@ -399,7 +400,9 @@ def run_wrong_course_filter_smoke():
             assert {item["course_id"] for item in navigation["subjects"]} == {course["course_id"] for course in courses}
             scoped_navigation = store.knowledge_navigation({"course_id": courses[0]["course_id"]})
             assert len(scoped_navigation["subjects"]) == 1 and scoped_navigation["subjects"][0]["course_id"] == courses[0]["course_id"]
-            return {"status": "passed", "all": len(all_rows), "filtered": len(filtered), "knowledge_groups": len(navigation["subjects"])}
+            weak = [item for item in store.weak_points() if item["kind"] == "错误原因" and item["label"] == "概念混淆"]
+            assert len(weak) == 2 and {item["course_id"] for item in weak} == {course["course_id"] for course in courses}
+            return {"status": "passed", "all": len(all_rows), "filtered": len(filtered), "knowledge_groups": len(navigation["subjects"]), "weak_groups": len(weak)}
         finally:
             store.conn.close()
             app.ROOT = original_root
