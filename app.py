@@ -2258,7 +2258,7 @@ class Store:
         non-empty filter value.
         """
         filters = {key: as_text(value).strip() for key, value in as_dict(filters).items()
-                   if key in {"subject_key", "chapter", "knowledge_point", "question_type"}
+                   if key in {"course_id", "subject_key", "chapter", "knowledge_point", "question_type"}
                    and as_text(value).strip()}
         rows = self.all("SELECT q.question_id FROM Question q JOIN QuestionRevision qr ON qr.question_revision_id=q.current_question_revision_id WHERE qr.revision_state='confirmed' AND qr.grading_reference_fixture_snapshot LIKE '%intake_id%'")
         result = []

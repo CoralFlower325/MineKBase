@@ -262,6 +262,41 @@ def run_politics_bank_smoke():
             store.conn.close()
             app.ROOT = original_root
 
+
+def run_wrong_course_filter_smoke():
+    """Ensure professional-course wrong questions remain separable by course."""
+    original_root = app.ROOT
+    with tempfile.TemporaryDirectory(prefix="wrong-course-filter-") as directory:
+        root = Path(directory)
+        (root / "schema.sql").write_text((original_root / "schema.sql").read_text(), encoding="utf-8")
+        app.ROOT = root
+        store = app.Store(root / "wrong-course-filter.sqlite", lambda: "2026-09-05T00:00:00Z")
+        try:
+            courses = [
+                store.create_course({"course_group": "电子类考研", "course_name": "信号与系统", "subject_key": "professional"}),
+                store.create_course({"course_group": "电子类考研", "course_name": "数字电路", "subject_key": "professional"}),
+            ]
+            for index, course in enumerate(courses, start=1):
+                intake = store.create_intake_batch([], course_id=course["course_id"])
+                store.patch_intake(intake["intake_id"], {"draft_fields": {
+                    "analysis_status": "draft",
+                    "question_text": f"课程隔离测试题 {index}",
+                    "reference_answer": "参考解",
+                    "error_type": "knowledge_gap",
+                    "chapter": "测试章节",
+                    "knowledge_point": "测试知识点",
+                }})
+                assert store.confirm_intake(intake["intake_id"])["confirmed"]
+            all_rows = store.list_wrong_questions()
+            filtered = store.list_wrong_questions({"course_id": courses[0]["course_id"]})
+            assert len(all_rows) == 2 and len(filtered) == 1
+            assert filtered[0]["course_id"] == courses[0]["course_id"]
+            assert filtered[0]["question_text"] == "课程隔离测试题 1"
+            return {"status": "passed", "all": len(all_rows), "filtered": len(filtered)}
+        finally:
+            store.conn.close()
+            app.ROOT = original_root
+
 def main():
     if len(sys.argv) > 1 and sys.argv[1] == "SIMILAR-PRACTICE-INTAKE":
         print(json.dumps({"runner": "run_p0_scenarios", "results": [{"scenario_id": "SIMILAR-PRACTICE-INTAKE", "status": run_similar_practice_intake_smoke()["status"]}]}, ensure_ascii=False, indent=2))
@@ -281,5 +316,6 @@ def main():
     results.append({'scenario_id':'QUESTION-BANK-SMOKE','status':run_question_bank_smoke()['status']})
     results.append({'scenario_id':'KNOWLEDGE-CANDIDATE-SMOKE','status':run_knowledge_candidate_smoke()['status']})
     results.append({'scenario_id':'POLITICS-BANK-SMOKE','status':run_politics_bank_smoke()['status']})
+    results.append({'scenario_id':'WRONG-COURSE-FILTER-SMOKE','status':run_wrong_course_filter_smoke()['status']})
     print(json.dumps({'runner':'run_p0_scenarios','results':results},ensure_ascii=False,indent=2))
 if __name__=='__main__': main()
