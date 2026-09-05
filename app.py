@@ -370,15 +370,28 @@ class Store:
         rows = payload.get("items") if isinstance(payload.get("items"), list) else payload.get("rows")
         if not isinstance(rows, list):
             rows = [payload] if payload.get("course_id") else []
+        prepared = []
+        for raw in rows:
+            item = as_dict(raw)
+            course_id = as_text(item.get("course_id") or payload.get("course_id")).strip()
+            if not self._course(course_id):
+                raise DomainError("invalid_course", "each question bank item needs a valid course_id", {"course_id": course_id})
+            node_id = as_text(item.get("knowledge_node_id")).strip() or None
+            if not node_id and as_text(item.get("knowledge_point")).strip():
+                candidates = self._ensure_knowledge_candidates(course_id, [{
+                    "chapter": item.get("chapter"),
+                    "knowledge_point": item.get("knowledge_point"),
+                    "origin": "question_bank",
+                }])
+                point = as_text(item.get("knowledge_point")).strip()
+                chapter = as_text(item.get("chapter")).strip()
+                matching = [candidate for candidate in candidates if candidate.get("name") == point and (not chapter or candidate.get("parent_id"))]
+                node_id = matching[-1]["knowledge_node_id"] if matching else None
+            prepared.append((item, course_id, node_id))
         imported = []
         self.begin()
         try:
-            for raw in rows:
-                item = as_dict(raw)
-                course_id = as_text(item.get("course_id") or payload.get("course_id")).strip()
-                if not self._course(course_id):
-                    raise DomainError("invalid_course", "each question bank item needs a valid course_id", {"course_id": course_id})
-                node_id = as_text(item.get("knowledge_node_id")).strip() or None
+            for item, course_id, node_id in prepared:
                 if node_id:
                     node = self.one("SELECT course_id FROM KnowledgeNode WHERE knowledge_node_id=? AND confirmation_state!='archived'", (node_id,))
                     if not node or node["course_id"] != course_id:
@@ -421,6 +434,7 @@ class Store:
                 "question_text": question_text,
                 "image_path": image_path or None,
                 "chapter": as_text(item.get("chapter")).strip() or None,
+                "knowledge_point": as_text(item.get("knowledge_point")).strip() or None,
                 "knowledge_node_id": node_id or None,
                 "question_type": as_text(item.get("question_type")).strip() or None,
                 "difficulty": as_text(item.get("difficulty")).strip() or None,

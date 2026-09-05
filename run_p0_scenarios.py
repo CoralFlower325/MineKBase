@@ -157,8 +157,12 @@ def run_question_bank_smoke():
             confirmed = store.confirm_intake(intake["intake_id"])
             imported = store.import_question_bank({"course_id": course["course_id"], "items": [
                 {"question_text": "同知识点相似题", "chapter": "数字逻辑", "knowledge_node_id": node["knowledge_node_id"], "question_type": "选择题", "difficulty": "中", "reference_answer": "答案 A", "explanation": "看状态转移"},
-                {"question_text": "同课程不同知识点", "chapter": "数字逻辑", "question_type": "选择题", "difficulty": "中", "reference_answer": "答案 B"},
+                {"question_text": "同课程不同知识点", "chapter": "数字逻辑", "knowledge_point": "组合逻辑", "question_type": "选择题", "difficulty": "中", "reference_answer": "答案 B"},
             ]})
+            generated_node = store.one("SELECT * FROM KnowledgeNode WHERE course_id=? AND name=?", (course["course_id"], "组合逻辑"))
+            assert generated_node and generated_node["confirmation_state"] == "candidate"
+            generated_bank = store.one("SELECT knowledge_node_id FROM QuestionBankItem WHERE question_bank_item_id=?", (imported["question_bank_item_ids"][1],))
+            assert generated_bank["knowledge_node_id"] == generated_node["knowledge_node_id"]
             updated_item = store.update_question_bank_item(imported["question_bank_item_ids"][0], {"question_text": "同知识点相似题（已维护）", "options": "A. 正确|B. 错误", "reference_answer": "A"})
             bulk = store.bulk_update_question_bank({"items": [{"question_bank_item_id": imported["question_bank_item_ids"][1], "explanation": "补充说明"}]})
             similar = store.similar_question_bank(confirmed["question_id"])
