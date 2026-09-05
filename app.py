@@ -1438,7 +1438,10 @@ class Store:
                     self.conn.execute("UPDATE ImageAsset SET ordinal=? WHERE asset_id=?", (ordinal, asset_id))
             saved_count = self.one("SELECT COUNT(*) FROM ImageAsset WHERE batch_id=? AND state='saved'", (batch_id,))[0]
             incomplete_count = self.one("SELECT COUNT(*) FROM ImageAsset WHERE batch_id=? AND state='incomplete'", (batch_id,))[0]
-            next_state = "saved" if saved_count and not incomplete_count else "incomplete"
+            # A text or question-bank practice intake may legitimately have no
+            # image assets. Only persisted incomplete assets mean upload
+            # failure; an empty batch remains editable and ready for review.
+            next_state = "incomplete" if incomplete_count else "saved"
             self.conn.execute("UPDATE IntakeItem SET state=?,draft_fields=?,updated_at=? WHERE intake_id=?", (next_state, dumps(draft), self.clock(), intake_id))
             if confirmed:
                 self._sync_confirmed_draft_fields(draft)

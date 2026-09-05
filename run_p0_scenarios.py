@@ -133,6 +133,7 @@ def run_similar_practice_intake_smoke():
         try:
             course = store.create_course({"course_group": "电子类考研", "course_name": "信号与系统", "subject_key": "professional"})
             base = store.create_intake_batch([], course_id=course["course_id"])
+            assert base["state"] == "saved" and base["assets"] == []
             store.patch_intake(base["intake_id"], {"draft_fields": {
                 "analysis_status": "draft",
                 "question_text": "原题：求极限",
@@ -140,6 +141,7 @@ def run_similar_practice_intake_smoke():
                 "error_reason": "概念混淆",
                 "error_breakpoint": "第一步",
             }})
+            assert store._intake_detail(base["intake_id"])["state"] == "saved"
             confirmed = store.confirm_intake(base["intake_id"])
             question_id = confirmed["question_id"]
             question_count = store.one("SELECT COUNT(*) AS count FROM Question")["count"]
