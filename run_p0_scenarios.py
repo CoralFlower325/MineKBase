@@ -62,13 +62,17 @@ def run_fts_fallback_smoke():
         try:
             assert store.conn.execute("PRAGMA user_version").fetchone()[0] == 4
             course = store.create_course({"course_group": "电子类考研", "course_name": "信号与系统", "subject_key": "professional"})
-            artifact = store.capture_source({"source_name": "教材", "course_id": course["course_id"], "raw_text": "第1章 信号与系统\n\n傅里叶变换用于频域分析"})
+            artifact = store.capture_source({"source_name": "教材", "course_id": course["course_id"], "raw_text": "第1章 信号与系统\n1.1 连续时间信号\n1.2 离散时间信号\n知识点：傅里叶变换\n\n傅里叶变换用于频域分析"})
             store.fts_available = False
             store.conn.execute("DROP TABLE SourcePassageFTS")
             store.conn.commit()
             assert store.enrich_source(artifact["source_artifact_id"])["parse_state"] == "ready"
             heading = store.one("SELECT * FROM KnowledgeNode WHERE course_id=? AND name=?", (course["course_id"], "第1章 信号与系统"))
             assert heading and heading["confirmation_state"] == "candidate" and heading["origin"] == "source_heading"
+            subsection = store.one("SELECT * FROM KnowledgeNode WHERE course_id=? AND name=?", (course["course_id"], "1.1 连续时间信号"))
+            point = store.one("SELECT * FROM KnowledgeNode WHERE course_id=? AND name=?", (course["course_id"], "傅里叶变换"))
+            assert subsection and subsection["parent_id"] == heading["knowledge_node_id"]
+            assert point and point["parent_id"] == heading["knowledge_node_id"]
             rows = store.retrieve("频域分析")
             assert rows and rows[0]["source_artifact_id"] == artifact["source_artifact_id"]
             return {"status": "passed", "fts_available": store.fts_available}

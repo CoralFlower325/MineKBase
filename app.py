@@ -1457,18 +1457,56 @@ class Store:
             return []
         import re
         heading_pattern = re.compile(r"^(?:第[一二三四五六七八九十百千万0-9]+[章节篇]|[0-9]+(?:\.[0-9]+)*\s+|[一二三四五六七八九十百千万]+、).{1,70}$")
-        headings = []
+        candidates = []
         seen = set()
+        chapter_by_prefix = {}
+        current_chapter = None
+
+        def number_key(value):
+            value = as_text(value)
+            simple = {"一": "1", "二": "2", "三": "3", "四": "4", "五": "5", "六": "6", "七": "7", "八": "8", "九": "9", "十": "10"}
+            return simple.get(value, value)
+
+        def add_candidate(chapter, point=None):
+            chapter, point = as_text(chapter).strip(), as_text(point).strip()
+            marker = (chapter, point)
+            if (chapter or point) and marker not in seen:
+                seen.add(marker)
+                candidates.append({"chapter": chapter, "knowledge_point": point, "origin": "source_heading"})
+
         rows = self.all("SELECT text FROM SourcePassage WHERE source_artifact_id=? ORDER BY ordinal", (artifact_id,))
         for row in rows:
             for raw_line in as_text(row["text"]).replace("\r\n", "\n").split("\n"):
                 line = re.sub(r"^[#>*\-\s]+", "", raw_line).strip()
                 line = re.sub(r"[：:；;，,。．.]+$", "", line).strip()
-                if not line or len(line) < 3 or len(line) > 80 or line in seen or not heading_pattern.match(line):
+                if not line or len(line) < 3 or len(line) > 80 or not (heading_pattern.match(line) or re.match(r"^(?:知识点|考点)\s*[:：]\s*.+$", line)):
                     continue
-                seen.add(line)
-                headings.append(line)
-        return self._ensure_knowledge_candidates(course_id, [{"chapter": heading, "origin": "source_heading"} for heading in headings[:50]])
+                chapter_match = re.match(r"^第(?P<number>[一二三四五六七八九十百千万0-9]+)[章节篇]", line)
+                numeric_match = re.match(r"^(?P<number>[0-9]+(?:\.[0-9]+)*)\s+", line)
+                point_match = re.match(r"^(?:知识点|考点)\s*[:：]\s*(?P<point>.+)$", line)
+                if chapter_match:
+                    current_chapter = line
+                    chapter_by_prefix[number_key(chapter_match.group("number"))] = line
+                    add_candidate(line)
+                elif numeric_match:
+                    prefix = numeric_match.group("number")
+                    if "." not in prefix:
+                        current_chapter = line
+                        chapter_by_prefix[prefix] = line
+                        add_candidate(line)
+                    else:
+                        parent = chapter_by_prefix.get(prefix.split(".", 1)[0]) or current_chapter
+                        add_candidate(parent or line, None if parent is None else line)
+                elif point_match and current_chapter:
+                    add_candidate(current_chapter, point_match.group("point"))
+                else:
+                    current_chapter = line
+                    add_candidate(line)
+                if len(candidates) >= 50:
+                    break
+            if len(candidates) >= 50:
+                break
+        return self._ensure_knowledge_candidates(course_id, candidates)
 
     def enrich_source(self, artifact_id):
         self.begin()
