@@ -304,6 +304,9 @@ def run_question_bank_smoke():
             assert practice_grading["source_question_bank_item_id"] == filtered[0]["question_bank_item_id"]
             assert practice_grading["bank_explanation"] == "看状态转移"
             assert practice_grading["bank_source"] == "真题整理" and practice_grading["bank_year"] == "2024"
+            bank_export = store.export_wrong_questions(include_answers=True, filters={"course_id": course["course_id"]})
+            assert "- 答案来源：题库导入" in bank_export
+            assert "- 题库依据：" in bank_export and "真题整理" in bank_export and "2024" in bank_export
             practice_task = store.one("SELECT * FROM ReviewTask WHERE question_id=? AND status='open'", (practice_confirmed["question_id"],))
             practice_attempt = store.one("SELECT * FROM Attempt WHERE question_id=? AND origin_kind='initial'", (practice_confirmed["question_id"],))
             assert practice_task and practice_task["reason_kind"] == "initial_error"

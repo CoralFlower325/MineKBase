@@ -3543,6 +3543,33 @@ class Store:
             lines.append(f"- 科目：{grading.get('subject_key') or '未分类'}")
             lines.append(f"- 章节：{grading.get('chapter') or '待补充'}")
             lines.append(f"- 知识点：{grading.get('knowledge_point') or '待补充'}")
+            answer_origins = {
+                "matched": "匹配题目",
+                "reference_image": "参考答案图/模型",
+                "user_material": "用户资料候选",
+                "question_bank": "题库导入",
+                "model": "模型候选",
+                "user_edit": "用户手动修改",
+            }
+            lines.append(f"- 答案来源：{answer_origins.get(grading.get('answer_origin'), grading.get('answer_origin') or '待补充')}")
+            if grading.get("source_question_bank_item_id"):
+                bank_label = grading.get("source_question_bank_item_id")
+                if grading.get("bank_source"):
+                    bank_label += f" · {grading['bank_source']}"
+                if grading.get("bank_year"):
+                    bank_label += f" · {grading['bank_year']}"
+                lines.append(f"- 题库依据：{bank_label}")
+            source_links = detail.get("sources") or []
+            if source_links:
+                source_labels = []
+                for source in source_links:
+                    label = as_text(source.get("source_artifact_id")) or "资料"
+                    if source.get("page_no"):
+                        label += f" · 第{source['page_no']}页"
+                    if source.get("locator_json"):
+                        label += f" · {source['locator_json']}"
+                    source_labels.append(label)
+                lines.append(f"- 资料出处：{'；'.join(source_labels)}")
             for asset in detail.get("assets", []):
                 lines.append(f"- 题面图片：![{asset.get('original_filename', 'image')}]({asset.get('media_url')})")
             if include_answers:
