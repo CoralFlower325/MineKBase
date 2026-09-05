@@ -623,6 +623,8 @@ class Store:
         if filters.get("question_bank_item_id"):
             clauses.append("a.question_bank_item_id=?")
             args.append(filters["question_bank_item_id"])
+        if filters.get("latest_only") in {True, "1", 1, "true", "yes"}:
+            clauses.append("NOT EXISTS (SELECT 1 FROM QuestionBankAttempt latest WHERE latest.question_bank_item_id=a.question_bank_item_id AND (latest.answered_at>a.answered_at OR (latest.answered_at=a.answered_at AND latest.rowid>a.rowid)))")
         if filters.get("incorrect_only") in {True, "1", 1, "true", "yes"}:
             clauses.append("a.is_correct=0")
         where = " WHERE " + " AND ".join(clauses) if clauses else ""

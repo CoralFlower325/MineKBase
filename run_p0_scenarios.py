@@ -345,7 +345,12 @@ def run_politics_bank_smoke():
             incorrect = store.list_question_bank_attempts({"course_id": "course-politics", "incorrect_only": "1"})
             assert len(attempts) == 2 and len(incorrect) == 1 and incorrect[0]["selected_answer"] == "A"
             assert incorrect[0]["options"]["B"] == "选项二" and incorrect[0]["explanation"] == "答案依据题干中的基本概念。"
-            return {"status": "passed", "attempts": len(attempts), "incorrect": len(incorrect)}
+            current_incorrect = store.list_question_bank_attempts({"course_id": "course-politics", "incorrect_only": "1", "latest_only": "1"})
+            assert current_incorrect == []
+            store.answer_question_bank(item["question_bank_item_ids"][0], {"selected_answer": "A"})
+            current_incorrect = store.list_question_bank_attempts({"course_id": "course-politics", "incorrect_only": "1", "latest_only": "1"})
+            assert len(current_incorrect) == 1 and current_incorrect[0]["selected_answer"] == "A"
+            return {"status": "passed", "attempts": len(attempts) + 1, "incorrect": len(incorrect), "current_incorrect": len(current_incorrect)}
         finally:
             store.conn.close()
             app.ROOT = original_root
