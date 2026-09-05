@@ -369,6 +369,12 @@ def run_knowledge_candidate_smoke():
             assert formatted["question_type"] == "极限计算"
             assert formatted["error_reason"] == "方法选择错误"
             assert formatted["error_breakpoint"] == "第二步"
+            structured = store._extract_analysis('```json\n{"题面":"求积分", "参考解":"分部积分", "科目":"math", "错误类型":"method_selection", "首次出错步骤":"第三步"}\n```', "math")
+            assert structured["question_text"] == "求积分"
+            assert structured["reference_answer"] == "分部积分"
+            assert structured["subject_key"] == "math"
+            assert structured["error_type"] == "method_selection"
+            assert structured["error_breakpoint"] == "第三步"
             long_candidates = store._answer_candidates({}, intake["batch_id"], [{"kind": "source", "text": "长资料" * 500, "source_passage_id": "passage-long", "source_name": "长资料"}])
             assert long_candidates[0]["source_excerpted"] and "资料较长" in long_candidates[0]["answer"] and long_candidates[0]["source_text"]
             point = next(node for node in nodes if node["name"] == "二叉树遍历")

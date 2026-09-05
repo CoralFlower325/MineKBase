@@ -2190,6 +2190,45 @@ class Store:
             "politics": ("politics", "政治"),
             "professional": ("professional", "专业课"),
         }
+        # Some vision/agent providers honor a structured-output request and
+        # return a JSON object (sometimes inside a fenced code block) instead
+        # of the requested Markdown headings. Accept that shape as a fallback;
+        # it remains a draft and follows the same user-confirmation boundary.
+        json_key_map = {
+            "question_text": "question_text", "question": "question_text", "题面": "question_text", "原题": "question_text", "题目": "question_text",
+            "reference_answer": "reference_answer", "answer": "reference_answer", "答案": "reference_answer", "参考答案": "reference_answer", "参考解": "reference_answer", "标准答案": "reference_answer",
+            "subject_key": "subject_key", "subject": "subject_key", "科目": "subject_key", "chapter": "chapter", "章节": "chapter",
+            "knowledge_point": "knowledge_point", "knowledge": "knowledge_point", "知识点": "knowledge_point", "question_type": "question_type", "题型": "question_type", "方法": "question_type",
+            "error_type": "error_type", "错误类型": "error_type", "error_reason": "error_reason", "错误原因": "error_reason", "错误分析": "error_reason",
+            "error_breakpoint": "error_breakpoint", "首次出错步骤": "error_breakpoint", "首次错误步骤": "error_breakpoint", "correct_approach": "correct_approach", "正确思路": "correct_approach", "正确解法": "correct_approach",
+        }
+        json_text = as_text(raw).strip()
+        if json_text.startswith("```"):
+            json_text = json_text.split("\n", 1)[1] if "\n" in json_text else ""
+            if json_text.endswith("```"):
+                json_text = json_text[:-3].rstrip()
+        if json_text.startswith("{") and json_text.endswith("}"):
+            try:
+                structured = json.loads(json_text)
+            except (TypeError, ValueError):
+                structured = None
+            if isinstance(structured, dict):
+                for label, value in structured.items():
+                    key = json_key_map.get(as_text(label).strip().lower(), json_key_map.get(as_text(label).strip()))
+                    if not key or isinstance(value, (dict, list, tuple)):
+                        continue
+                    fields[key] = as_text(value).strip()
+                if fields.get("subject_key"):
+                    lowered = fields["subject_key"].lower()
+                    fields["subject_key"] = next((subject for subject, names in subject_aliases.items() if any(name in lowered for name in names)), subject_hint if subject_hint in SUBJECT_KEYS else None)
+                if fields.get("error_type"):
+                    lowered = fields["error_type"].lower()
+                    error_names = {
+                        "knowledge_gap": ("knowledge_gap", "知识点不会", "知识点不熟", "知识缺失", "不会"),
+                        "method_selection": ("method_selection", "方法选择错误", "方法错误", "思路错误", "选法错误"),
+                        "derivation_calculation": ("derivation_calculation", "推导或计算出错", "推导错误", "计算错误", "计算出错", "运算错误"),
+                    }
+                    fields["error_type"] = next((error_type for error_type, names in error_names.items() if any(name in lowered for name in names)), "")
         label_union = "|".join(aliases.values())
         section_re = re.compile(
             rf"(?im)^[ \t]*{heading_prefix}(?P<label>{label_union})(?:\*\*)?[ \t]*(?:(?:[:：])[ \t]*(?P<inline>[^\n]*))?[ \t]*$"
