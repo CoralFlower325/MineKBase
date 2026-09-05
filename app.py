@@ -556,7 +556,7 @@ class Store:
         if filters.get("incorrect_only") in {True, "1", 1, "true", "yes"}:
             clauses.append("a.is_correct=0")
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
-        rows = self.all("SELECT a.*,q.question_text,q.chapter,q.question_type,q.raw_payload FROM QuestionBankAttempt a JOIN QuestionBankItem q ON q.question_bank_item_id=a.question_bank_item_id" + where + " ORDER BY a.answered_at DESC LIMIT ?", args + [max(1, min(int(filters.get("limit", 100)), 500))])
+        rows = self.all("SELECT a.*,q.question_text,q.chapter,q.question_type,q.explanation,q.raw_payload FROM QuestionBankAttempt a JOIN QuestionBankItem q ON q.question_bank_item_id=a.question_bank_item_id" + where + " ORDER BY a.answered_at DESC LIMIT ?", args + [max(1, min(int(filters.get("limit", 100)), 500))])
         result = []
         for row in rows:
             item = dict(row)

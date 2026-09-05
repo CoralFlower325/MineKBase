@@ -257,7 +257,7 @@ def run_politics_bank_smoke():
             attempts = store.list_question_bank_attempts({"course_id": "course-politics"})
             incorrect = store.list_question_bank_attempts({"course_id": "course-politics", "incorrect_only": "1"})
             assert len(attempts) == 2 and len(incorrect) == 1 and incorrect[0]["selected_answer"] == "A"
-            assert incorrect[0]["options"]["B"] == "选项二"
+            assert incorrect[0]["options"]["B"] == "选项二" and incorrect[0]["explanation"] == "答案依据题干中的基本概念。"
             return {"status": "passed", "attempts": len(attempts), "incorrect": len(incorrect)}
         finally:
             store.conn.close()
