@@ -1438,7 +1438,7 @@ class Store:
         if not revision:
             return
         grading = as_dict(loads(revision["grading_reference_fixture_snapshot"], {}))
-        for key in ("reference_answer", "answer_origin", "error_reason", "error_breakpoint", "correct_approach", "chapter", "knowledge_point", "question_type"):
+        for key in ("reference_answer", "answer_origin", "error_type", "error_reason", "error_breakpoint", "correct_approach", "chapter", "knowledge_point", "question_type"):
             if key in draft:
                 grading[key] = as_text(draft.get(key))
         if "question_text" in draft:

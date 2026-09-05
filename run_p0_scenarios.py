@@ -44,6 +44,7 @@ def run_image_smoke():
                 "question_text": "用户修正后的题面",
                 "reference_answer": "用户补充的参考解",
                 "chapter": "修正章节",
+                "error_type": "method_selection",
             }})
             edited = store._intake_detail(intake["intake_id"])
             assert edited["field_sources"]["question_text"] == "用户修改"
@@ -55,6 +56,7 @@ def run_image_smoke():
             assert app.loads(prompt["presentation_snapshot"], {})["content"] == "用户修正后的题面"
             wrong_detail_after_edit = store.get_wrong_question(question_id)
             assert wrong_detail_after_edit["question_text"] == "用户修正后的题面"
+            assert wrong_detail_after_edit["grading"]["error_type"] == "method_selection"
             wrong_detail = store.get_wrong_question(question_id)
             assert any((asset.get("review_role") or asset.get("role")) == "my_process" for asset in wrong_detail["process_assets"])
             initial = store.one("SELECT response_snapshot FROM Attempt WHERE question_id=? AND origin_kind='initial'", (question_id,))
