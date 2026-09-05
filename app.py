@@ -3458,6 +3458,7 @@ class Store:
             item = {
                 "question_id": row["question_id"],
                 "question_text": question_text or "待补题面",
+                "error_type": as_text(grading.get("error_type")),
                 "error_reason": as_text(grading.get("error_reason")),
                 "error_breakpoint": as_text(grading.get("error_breakpoint")),
                 "attempts": attempt_items,
