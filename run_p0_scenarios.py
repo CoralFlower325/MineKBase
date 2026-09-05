@@ -229,6 +229,10 @@ def run_knowledge_candidate_smoke():
             }})
             resolved = store.resolve_intake(intake["intake_id"])
             nodes = resolved["draft_fields"]["knowledge_node_candidates"]
+            answer_candidates = store._answer_candidates({}, intake["batch_id"], [{"kind": "source", "text": "教材说明\n参考答案：先列出递归关系，再按定义展开。\n补充：检查边界条件。", "source_passage_id": "passage-test", "source_name": "教材"}])
+            assert answer_candidates[0]["answer"] == "先列出递归关系，再按定义展开。" and answer_candidates[0]["source_text"]
+            long_candidates = store._answer_candidates({}, intake["batch_id"], [{"kind": "source", "text": "长资料" * 500, "source_passage_id": "passage-long", "source_name": "长资料"}])
+            assert long_candidates[0]["source_excerpted"] and "资料较长" in long_candidates[0]["answer"] and long_candidates[0]["source_text"]
             point = next(node for node in nodes if node["name"] == "二叉树遍历")
             assert point["confirmation_state"] == "candidate" and point["course_id"] == course["course_id"]
             promoted = store.update_knowledge_node(point["knowledge_node_id"], {"confirmation_state": "confirmed"})

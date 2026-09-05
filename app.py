@@ -1217,6 +1217,23 @@ class Store:
             seen.add(answer)
             result.append({"origin": origin, "label": label, "answer": answer, "priority": priority, **extra})
 
+        def source_answer(text):
+            import re
+            normalized = "\n".join(line.strip() for line in as_text(text).replace("\r\n", "\n").split("\n") if line.strip())
+            if not normalized:
+                return "", False, ""
+            marker = re.search(r"(?im)^(?:参考答案|标准答案|答案|解答|解析|解题思路|解题过程)\s*[:：]\s*(.*)$", normalized)
+            excerpt = normalized
+            if marker:
+                excerpt = normalized[marker.start(1):].strip()
+                next_section = re.search(r"\n\s*(?:题面|题目|知识点|章节|解析|参考答案|标准答案|补充|说明|注意)\s*[:：]", excerpt)
+                if next_section:
+                    excerpt = excerpt[:next_section.start()].strip()
+            truncated = len(excerpt) > 1200
+            if truncated:
+                excerpt = excerpt[:1200].rstrip() + "…（资料较长，请展开原文确认）"
+            return excerpt, bool(marker or truncated or excerpt != normalized), normalized
+
         reference_assets = self.all("SELECT asset_id,role FROM ImageAsset WHERE batch_id=? AND state='saved'", (batch_id,))
         if any(row["role"] == "reference" for row in reference_assets):
             add("reference_image", "参考答案图（模型提取，需确认）", draft.get("reference_answer"), 1, asset_ids=[row["asset_id"] for row in reference_assets if row["role"] == "reference"])
@@ -1224,7 +1241,11 @@ class Store:
         for candidate in candidates:
             kind = as_text(candidate.get("kind"))
             if kind == "source":
-                add("user_material", "用户资料候选（需确认）", candidate.get("text"), 2, source_passage_id=candidate.get("source_passage_id"), source_name=candidate.get("source_name"), page_no=candidate.get("page_no"))
+                answer, excerpted, source_text = source_answer(candidate.get("text"))
+                extra = {"source_passage_id": candidate.get("source_passage_id"), "source_name": candidate.get("source_name"), "page_no": candidate.get("page_no"), "source_excerpted": excerpted}
+                if excerpted:
+                    extra["source_text"] = source_text
+                add("user_material", "用户资料候选（需确认）", answer, 2, **extra)
             elif kind == "question_bank":
                 add("question_bank", "已导入题库答案", as_dict(candidate.get("grading")).get("reference_answer"), 3, question_bank_item_id=candidate.get("question_bank_item_id"))
             elif kind == "question":
