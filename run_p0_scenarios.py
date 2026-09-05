@@ -268,6 +268,8 @@ def run_question_bank_smoke():
             assert practice_grading["knowledge_point"] == "时序逻辑"
             assert practice_grading["answer_origin"] == "question_bank"
             assert practice_grading["difficulty"] == "中"
+            assert practice_grading["source_question_bank_item_id"] == filtered[0]["question_bank_item_id"]
+            assert practice_grading["bank_explanation"] == "看状态转移"
             practice_task = store.one("SELECT * FROM ReviewTask WHERE question_id=? AND status='open'", (practice_confirmed["question_id"],))
             practice_attempt = store.one("SELECT * FROM Attempt WHERE question_id=? AND origin_kind='initial'", (practice_confirmed["question_id"],))
             assert practice_task and practice_task["reason_kind"] == "initial_error"
