@@ -58,7 +58,7 @@ def run_fts_fallback_smoke():
         app.ROOT = root
         store = app.Store(root / "fts.sqlite", lambda: "2026-09-05T00:00:00Z")
         try:
-            assert store.conn.execute("PRAGMA user_version").fetchone()[0] == 3
+            assert store.conn.execute("PRAGMA user_version").fetchone()[0] == 4
             artifact = store.capture_source({"source_name": "教材", "raw_text": "傅里叶变换用于频域分析"})
             store.fts_available = False
             store.conn.execute("DROP TABLE SourcePassageFTS")
@@ -227,6 +227,38 @@ def run_knowledge_candidate_smoke():
             store.conn.close()
             app.ROOT = original_root
 
+
+def run_politics_bank_smoke():
+    """Exercise objective political-bank checking and incorrect-attempt storage."""
+    original_root = app.ROOT
+    with tempfile.TemporaryDirectory(prefix="politics-bank-") as directory:
+        root = Path(directory)
+        (root / "schema.sql").write_text((original_root / "schema.sql").read_text(), encoding="utf-8")
+        app.ROOT = root
+        store = app.Store(root / "politics.sqlite", lambda: "2026-09-05T00:00:00Z")
+        try:
+            item = store.import_question_bank({"course_id": "course-politics", "items": [{
+                "question_text": "下列哪项属于政治选择题测试？",
+                "chapter": "马克思主义基本原理",
+                "question_type": "单选题",
+                "difficulty": "易",
+                "options": {"A": "选项一", "B": "选项二", "C": "选项三", "D": "选项四"},
+                "reference_answer": "B",
+                "explanation": "答案依据题干中的基本概念。",
+            }]})
+            bank = store.list_question_bank({"course_id": "course-politics"})
+            assert bank[0]["options"]["B"] == "选项二"
+            wrong = store.answer_question_bank(item["question_bank_item_ids"][0], {"selected_answer": "A"})
+            right = store.answer_question_bank(item["question_bank_item_ids"][0], {"selected_answer": "B"})
+            assert wrong["is_correct"] is False and right["is_correct"] is True
+            attempts = store.list_question_bank_attempts({"course_id": "course-politics"})
+            incorrect = store.list_question_bank_attempts({"course_id": "course-politics", "incorrect_only": "1"})
+            assert len(attempts) == 2 and len(incorrect) == 1 and incorrect[0]["selected_answer"] == "A"
+            return {"status": "passed", "attempts": len(attempts), "incorrect": len(incorrect)}
+        finally:
+            store.conn.close()
+            app.ROOT = original_root
+
 def main():
     if len(sys.argv) > 1 and sys.argv[1] == "SIMILAR-PRACTICE-INTAKE":
         print(json.dumps({"runner": "run_p0_scenarios", "results": [{"scenario_id": "SIMILAR-PRACTICE-INTAKE", "status": run_similar_practice_intake_smoke()["status"]}]}, ensure_ascii=False, indent=2))
@@ -245,5 +277,6 @@ def main():
     results.append({'scenario_id':'SIMILAR-PRACTICE-INTAKE','status':run_similar_practice_intake_smoke()['status']})
     results.append({'scenario_id':'QUESTION-BANK-SMOKE','status':run_question_bank_smoke()['status']})
     results.append({'scenario_id':'KNOWLEDGE-CANDIDATE-SMOKE','status':run_knowledge_candidate_smoke()['status']})
+    results.append({'scenario_id':'POLITICS-BANK-SMOKE','status':run_politics_bank_smoke()['status']})
     print(json.dumps({'runner':'run_p0_scenarios','results':results},ensure_ascii=False,indent=2))
 if __name__=='__main__': main()

@@ -1,14 +1,14 @@
 # 考研知识库 × 错题本
 
-> 当前基线是“数学一 × 可配置专业课图片错题本”。政治后续作为章节选择题库接入，英语暂不开发。以 [design.md](design.md) 为唯一产品与开发基线；图片收录、分析草稿、候选/确认、资料解析、课程选择、知识节点绑定、会/不会/不确定回测和真实题库筛选第一版已经落地。
+> 当前基线是“数学一 × 可配置专业课图片错题本 + 政治章节选择题库”。政治只走客观题库和独立错答记录，英语暂不开发。以 [design.md](design.md) 为唯一产品与开发基线；图片收录、分析草稿、候选/确认、资料解析、课程选择、知识节点绑定、会/不会/不确定回测、真实题库筛选和政治刷题第一版已经落地。
 
 一个单用户、本地优先的数学一与专业课错题系统：资料和题目先保存，解析、检索和模型增强随后进行；用户确认后的错题事实进入个人知识树，错误变成下一次回测任务。
 
 ## 当前可以做什么
 
-当前产品主线是数学一、408 和可自定义的电子类专业课。首次启动会提供数学一、408、信号与系统三个默认课程，首页“新建专业课”或 `GET/POST /api/courses` 都可以创建自定义课程。课程选择会随题目和资料保存，旧 `subject_key` 仍作为兼容字段保留。
+当前产品主线是数学一、408、可自定义的电子类专业课，以及独立的政治选择题库。首次启动会提供数学一、408、信号与系统、政治四个默认课程，首页“新建专业课”或 `GET/POST /api/courses` 都可以创建自定义课程。课程选择会随题目和资料保存，旧 `subject_key` 仍作为兼容字段保留。
 
-个人知识节点可以通过 `GET/POST /api/knowledge-nodes` 按课程创建和查看；已确认题目可绑定同课程节点。题库第一版支持 JSON API 或 multipart CSV/JSON 导入：先调用 `POST /api/question-bank/preview` 逐行校验，再调用 `POST /api/question-bank/import` 写入；相似题查询为 `GET /api/wrong-questions/:id/similar`，按课程、知识节点、章节、题型和难度做轻量筛选。相似题可以通过 `POST /api/question-bank/:id/start` 转成待确认练习草稿，只有确认后才进入正式错题本。错题诊断中的错误类型固定为“知识点不会 / 方法选择错误 / 推导或计算出错”，同时保留原因和首次错误步骤文本。当前仍缺题库批量编辑和独立练习结果统计。
+个人知识节点可以通过 `GET/POST /api/knowledge-nodes` 按课程创建和查看；已确认题目可绑定同课程节点。题库第一版支持 JSON API 或 multipart CSV/JSON 导入：先调用 `POST /api/question-bank/preview` 逐行校验，再调用 `POST /api/question-bank/import` 写入；相似题查询为 `GET /api/wrong-questions/:id/similar`，按课程、知识节点、章节、题型和难度做轻量筛选。相似题可以通过 `POST /api/question-bank/:id/start` 转成待确认练习草稿，只有确认后才进入正式错题本。政治题库行可携带 `options`、`reference_answer`、`explanation`，首页支持按章节加载政治选择题并通过 `POST /api/question-bank/:id/answer` 判断对错，错答记录可从 `GET /api/question-bank/attempts` 查询。错题诊断中的错误类型固定为“知识点不会 / 方法选择错误 / 推导或计算出错”，同时保留原因和首次错误步骤文本。当前仍缺题库批量编辑和独立练习结果统计。
 
 - 用 SQLite 保存课程、学习目标、题目版本、回测任务、会话、Attempt、Assessment 和 EvidenceEvent。
 - 通过本地 Web API 或首页完成：建立/查看任务、开始回测、保存/继续编辑草稿、查看提示、提交作答、补充评价。

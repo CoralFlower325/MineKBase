@@ -38,7 +38,7 @@ ERROR_TYPES = {
     "derivation_calculation": "推导或计算出错",
 }
 REVIEW_OFFSETS = (3, 7, 10, 14)
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 TASK_PRIORITY = [
     "awaiting_assessment",
@@ -109,6 +109,43 @@ def as_text(value, default: str = "") -> str:
     return value if isinstance(value, str) else default
 
 
+def normalize_options(value):
+    """Accept JSON/object, list, or simple A. text|B. text option formats."""
+    if isinstance(value, dict):
+        return {as_text(key).strip(): as_text(item).strip() for key, item in value.items() if as_text(key).strip()}
+    if isinstance(value, list):
+        result = {}
+        for index, item in enumerate(value):
+            if isinstance(item, dict):
+                key = as_text(item.get("key") or item.get("label") or item.get("value")).strip()
+                text = as_text(item.get("text") or item.get("content") or item.get("label")).strip()
+            else:
+                key, text = "", as_text(item).strip()
+            if not key:
+                key = chr(ord("A") + index)
+            if text:
+                result[key] = text
+        return result
+    raw = as_text(value).strip()
+    if not raw:
+        return {}
+    parsed = loads(raw, None)
+    if isinstance(parsed, (dict, list)):
+        return normalize_options(parsed)
+    result = {}
+    import re
+    for index, part in enumerate(re.split(r"\s*[|；;]\s*|\n+", raw)):
+        part = part.strip()
+        if not part:
+            continue
+        match = re.match(r"^([A-Ha-h])[.、)）:\s]+(.+)$", part)
+        if match:
+            result[match.group(1).upper()] = match.group(2).strip()
+        else:
+            result[chr(ord("A") + index)] = part
+    return result
+
+
 class DomainError(Exception):
     def __init__(self, code: str, message: str, details=None):
         self.code = code
@@ -159,6 +196,7 @@ class Store:
             ("course-math-1", "考研", "数学一", "math"),
             ("course-408", "计算机考研", "408", "professional"),
             ("course-signals", "电子类考研", "信号与系统", "professional"),
+            ("course-politics", "公共课", "政治", "politics"),
         )
         now = self.clock()
         self.conn.executemany(
@@ -404,7 +442,53 @@ class Store:
                 args.append(value)
         query = "SELECT * FROM QuestionBankItem" + (" WHERE " + " AND ".join(clauses) if clauses else "") + " ORDER BY created_at DESC,question_bank_item_id LIMIT ?"
         args.append(max(1, min(int(filters.get("limit", 100)), 500)))
-        return [dict(row) for row in self.all(query, args)]
+        return [self._question_bank_item_dto(row) for row in self.all(query, args)]
+
+    def _question_bank_item_dto(self, row):
+        item = dict(row)
+        raw = loads(item.get("raw_payload"), {})
+        item["options"] = normalize_options(as_dict(raw).get("options"))
+        item["is_politics"] = item.get("course_id") == "course-politics"
+        return item
+
+    def answer_question_bank(self, question_bank_item_id, payload):
+        payload = as_dict(payload)
+        row = self.one("SELECT * FROM QuestionBankItem WHERE question_bank_item_id=?", (question_bank_item_id,))
+        if not row:
+            raise DomainError("not_found", "question bank item not found", {"question_bank_item_id": question_bank_item_id})
+        item = self._question_bank_item_dto(row)
+        selected = as_text(payload.get("selected_answer") or payload.get("answer")).strip().upper()
+        correct = as_text(item.get("reference_answer")).strip().upper()
+        if not selected:
+            raise DomainError("invalid_answer", "请选择一个答案")
+        if item.get("options") and selected not in {key.upper() for key in item["options"]}:
+            raise DomainError("invalid_answer", "答案选项不在题目选项中", {"selected_answer": selected, "options": list(item["options"].keys())})
+        is_correct = int(selected == correct)
+        attempt_id = uid("qba")
+        answered_at = self.clock()
+        self.begin()
+        try:
+            self.conn.execute("INSERT INTO QuestionBankAttempt(question_bank_attempt_id,question_bank_item_id,course_id,selected_answer,correct_answer,is_correct,answered_at) VALUES(?,?,?,?,?,?,?)", (attempt_id, question_bank_item_id, row["course_id"], selected, correct, is_correct, answered_at))
+            self.commit()
+        except Exception:
+            self.rollback()
+            raise
+        return {"question_bank_attempt_id": attempt_id, "question_bank_item_id": question_bank_item_id, "selected_answer": selected, "correct_answer": correct, "is_correct": bool(is_correct), "explanation": item.get("explanation") or "", "reference_answer": item.get("reference_answer") or "", "answered_at": answered_at}
+
+    def list_question_bank_attempts(self, filters=None):
+        filters = as_dict(filters)
+        clauses, args = [], []
+        if filters.get("course_id"):
+            clauses.append("a.course_id=?")
+            args.append(filters["course_id"])
+        if filters.get("question_bank_item_id"):
+            clauses.append("a.question_bank_item_id=?")
+            args.append(filters["question_bank_item_id"])
+        if filters.get("incorrect_only") in {True, "1", 1, "true", "yes"}:
+            clauses.append("a.is_correct=0")
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        rows = self.all("SELECT a.*,q.question_text,q.chapter,q.question_type FROM QuestionBankAttempt a JOIN QuestionBankItem q ON q.question_bank_item_id=a.question_bank_item_id" + where + " ORDER BY a.answered_at DESC LIMIT ?", args + [max(1, min(int(filters.get("limit", 100)), 500))])
+        return [dict(row) for row in rows]
 
     def similar_question_bank(self, question_id, limit=12):
         item = self._wrong_dto(question_id)
@@ -3240,6 +3324,10 @@ class Handler(BaseHTTPRequestHandler):
                 query = parse_qs(urlparse(self.path).query, keep_blank_values=True)
                 filters = {key: values[0] for key, values in query.items() if values}
                 return self._json(200, {"data": self.store.list_question_bank(filters)})
+            if path == "/api/question-bank/attempts":
+                query = parse_qs(urlparse(self.path).query, keep_blank_values=True)
+                filters = {key: values[0] for key, values in query.items() if values}
+                return self._json(200, {"data": self.store.list_question_bank_attempts(filters)})
             if path == "/api/knowledge":
                 query = parse_qs(urlparse(self.path).query, keep_blank_values=True)
                 filters = {key: values[0] for key, values in query.items() if values}
@@ -3369,6 +3457,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, {"data": self.store.create_knowledge_node(payload)})
             if path == "/api/question-bank/import":
                 return self._json(200, {"data": self.store.import_question_bank(payload)})
+            if path.startswith("/api/question-bank/") and path.endswith("/answer"):
+                item_id = path[len("/api/question-bank/"):-len("/answer")].strip("/")
+                return self._json(200, {"data": self.store.answer_question_bank(item_id, payload)})
             if path.startswith("/api/question-bank/") and path.endswith("/start"):
                 item_id = path[len("/api/question-bank/"):-len("/start")].strip("/")
                 return self._json(200, {"data": self.store.start_question_bank_item(item_id)})

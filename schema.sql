@@ -44,6 +44,17 @@ CREATE TABLE IF NOT EXISTS QuestionBankItem (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_question_bank_lookup ON QuestionBankItem(course_id,knowledge_node_id,chapter,question_type,difficulty);
+CREATE TABLE IF NOT EXISTS QuestionBankAttempt (
+    question_bank_attempt_id TEXT PRIMARY KEY,
+    question_bank_item_id TEXT NOT NULL REFERENCES QuestionBankItem(question_bank_item_id),
+    course_id TEXT NOT NULL REFERENCES Course(course_id),
+    selected_answer TEXT NOT NULL,
+    correct_answer TEXT NOT NULL,
+    is_correct INTEGER NOT NULL CHECK(is_correct IN (0,1)),
+    answered_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_question_bank_attempt_item ON QuestionBankAttempt(question_bank_item_id,answered_at);
+CREATE INDEX IF NOT EXISTS idx_question_bank_attempt_course ON QuestionBankAttempt(course_id,is_correct,answered_at);
 CREATE TABLE IF NOT EXISTS CoursePackRelease (release_id TEXT PRIMARY KEY, course_key TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS LearningObjective (learning_objective_id TEXT PRIMARY KEY, course_pack_release_id TEXT NOT NULL REFERENCES CoursePackRelease(release_id), name TEXT NOT NULL, description TEXT NOT NULL, observable_criteria TEXT NOT NULL, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS Question (question_id TEXT PRIMARY KEY, course_pack_release_id TEXT NOT NULL REFERENCES CoursePackRelease(release_id), current_question_revision_id TEXT, lifecycle_state TEXT NOT NULL CHECK(lifecycle_state IN ('candidate','active','archived')), created_at TEXT NOT NULL, FOREIGN KEY(current_question_revision_id) REFERENCES QuestionRevision(question_revision_id));
