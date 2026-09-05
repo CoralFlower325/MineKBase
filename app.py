@@ -206,11 +206,11 @@ class Store:
         self.conn.commit()
 
     def _ensure_default_courses(self):
-        """Create the small first-run course set without constraining custom courses."""
+        """Create four generic subject slots without constraining custom courses."""
         defaults = (
-            ("course-math-1", "考研", "数学一", "math"),
-            ("course-408", "计算机考研", "408", "professional"),
-            ("course-signals", "电子类考研", "信号与系统", "professional"),
+            ("course-math", "公共课", "数学", "math"),
+            ("course-english", "公共课", "英语", "english"),
+            ("course-professional", "专业课", "专业课", "professional"),
             ("course-politics", "公共课", "政治", "politics"),
         )
         now = self.clock()
@@ -611,7 +611,8 @@ class Store:
         item = dict(row)
         raw = loads(item.get("raw_payload"), {})
         item["options"] = normalize_options(as_dict(raw).get("options"))
-        item["is_politics"] = item.get("course_id") == "course-politics"
+        course = self.one("SELECT subject_key FROM Course WHERE course_id=?", (item.get("course_id"),))
+        item["is_politics"] = bool(course and course["subject_key"] == "politics")
         return item
 
     def answer_question_bank(self, question_bank_item_id, payload):
@@ -4018,6 +4019,20 @@ class Handler(BaseHTTPRequestHandler):
                 body = (ROOT / "index.html").read_bytes()
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            static_files = {
+                "/frontend.css": ("frontend.css", "text/css; charset=utf-8"),
+                "/frontend.js": ("frontend.js", "text/javascript; charset=utf-8"),
+            }
+            if path in static_files:
+                filename, content_type = static_files[path]
+                body = (ROOT / filename).read_bytes()
+                self.send_response(200)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Cache-Control", "no-cache")
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
