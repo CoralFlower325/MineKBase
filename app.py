@@ -723,6 +723,7 @@ class Store:
                 "chapter": "题库导入",
                 "knowledge_point": "题库导入",
                 "question_type": "题库导入",
+                "difficulty": "题库导入",
             },
             "candidate_origin": "question_bank",
             "source_question_bank_item_id": item["question_bank_item_id"],
@@ -1227,7 +1228,7 @@ class Store:
         fields = [
             key for key in (
                 "question_text", "reference_answer", "subject_key", "chapter",
-                "knowledge_point", "question_type", "error_type", "error_reason",
+                "knowledge_point", "question_type", "difficulty", "error_type", "error_reason",
                 "error_breakpoint", "correct_approach",
             ) if draft.get(key) not in (None, "")
         ]
@@ -1264,7 +1265,7 @@ class Store:
                 sources[key] = "原图/用户"
             elif key == "reference_answer":
                 sources[key] = answer_origin
-            elif key in {"subject_key", "chapter", "knowledge_point", "question_type", "error_type"} and draft.get("tag_candidates"):
+            elif key in {"subject_key", "chapter", "knowledge_point", "question_type", "difficulty", "error_type"} and draft.get("tag_candidates"):
                 sources[key] = "资料候选"
             else:
                 sources[key] = "模型候选"
@@ -1355,7 +1356,7 @@ class Store:
                 field_sources = dict(draft.get("field_sources")) if isinstance(draft.get("field_sources"), dict) else {}
                 incoming_sources = as_dict(incoming_fields.get("field_sources"))
                 for key in incoming_fields:
-                    if key in {"question_text", "reference_answer", "subject_key", "chapter", "knowledge_point", "question_type", "error_type", "error_reason", "error_breakpoint", "correct_approach"} and incoming_fields.get(key) != draft.get(key):
+                    if key in {"question_text", "reference_answer", "subject_key", "chapter", "knowledge_point", "question_type", "difficulty", "error_type", "error_reason", "error_breakpoint", "correct_approach"} and incoming_fields.get(key) != draft.get(key):
                         field_sources[key] = as_text(incoming_sources.get(key)).strip() or "用户修改"
                 draft.update(incoming_fields)
                 if field_sources:
@@ -1454,7 +1455,7 @@ class Store:
         if not revision:
             return
         grading = as_dict(loads(revision["grading_reference_fixture_snapshot"], {}))
-        for key in ("reference_answer", "answer_origin", "error_type", "error_reason", "error_breakpoint", "correct_approach", "chapter", "knowledge_point", "question_type"):
+        for key in ("reference_answer", "answer_origin", "error_type", "error_reason", "error_breakpoint", "correct_approach", "chapter", "knowledge_point", "question_type", "difficulty"):
             if key in draft:
                 grading[key] = as_text(draft.get(key))
         if "question_text" in draft:
@@ -2395,7 +2396,7 @@ class Store:
                 raise DomainError("invalid_knowledge_node", "knowledge node is not in the selected course", {"knowledge_node_id": knowledge_node_id})
             if knowledge_node and knowledge_node["confirmation_state"] == "candidate":
                 self.conn.execute("UPDATE KnowledgeNode SET confirmation_state='confirmed',origin='user' WHERE knowledge_node_id=?", (knowledge_node_id,))
-            grading = {"reference_answer":required["reference_answer"],"error_type":as_text(draft.get("error_type")),"error_reason":required["error_reason"],"error_breakpoint":required["error_breakpoint"],"correct_approach":as_text(draft.get("correct_approach")),"subject_key":subject,"course_id":row["course_id"],"knowledge_node_id":knowledge_node_id,"knowledge_point":knowledge_node["name"] if knowledge_node else draft.get("knowledge_point"),"chapter":draft.get("chapter"),"question_type":draft.get("question_type"),"intake_id":intake_id,"asset_refs":asset_refs,"selected_question_id":draft.get("selected_question_id"),"selected_source_passage_ids":selected_source_ids,"answer_origin":as_text(draft.get("answer_origin")) or "model","answer_candidates":as_list(draft.get("answer_candidates")),"question_image_status":"已保存题面" if question_assets else "待补题面"}
+            grading = {"reference_answer":required["reference_answer"],"error_type":as_text(draft.get("error_type")),"error_reason":required["error_reason"],"error_breakpoint":required["error_breakpoint"],"correct_approach":as_text(draft.get("correct_approach")),"subject_key":subject,"course_id":row["course_id"],"knowledge_node_id":knowledge_node_id,"knowledge_point":knowledge_node["name"] if knowledge_node else draft.get("knowledge_point"),"chapter":draft.get("chapter"),"question_type":draft.get("question_type"),"difficulty":draft.get("difficulty"),"intake_id":intake_id,"asset_refs":asset_refs,"selected_question_id":draft.get("selected_question_id"),"selected_source_passage_ids":selected_source_ids,"answer_origin":as_text(draft.get("answer_origin")) or "model","answer_candidates":as_list(draft.get("answer_candidates")),"question_image_status":"已保存题面" if question_assets else "待补题面"}
             presentation = {"schema_version":SNAPSHOT,"content":question_text,"blocks":[{"block_ref":"question","kind":"text","content":question_text,"leakage_state":"clean"}],"asset_refs":presentation_refs}
             self.conn.execute("INSERT INTO Question(question_id,course_pack_release_id,current_question_revision_id,lifecycle_state,created_at) VALUES(?,?,?,?,?)", (question_id,release_id,None,"active",created))
             self.conn.execute("INSERT INTO QuestionRevision(question_revision_id,question_id,revision_no,revision_state,supersedes_revision_id,current_review_prompt_revision_id,question_units,objective_mapping_snapshot,grading_reference_fixture_snapshot,help_content_fixture_snapshot,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)", (revision_id,question_id,1,"confirmed",None,None,dumps(units),dumps(mapping),dumps(grading),dumps([]),created))

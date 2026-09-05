@@ -261,6 +261,7 @@ def run_question_bank_smoke():
             practice_grading = app.loads(store.one("SELECT grading_reference_fixture_snapshot FROM QuestionRevision WHERE question_id=?", (practice_confirmed["question_id"],))[0], {})
             assert practice_grading["knowledge_point"] == "时序逻辑"
             assert practice_grading["answer_origin"] == "question_bank"
+            assert practice_grading["difficulty"] == "中"
             return {"status": "passed", "imported": imported["imported"], "similar": len(similar), "practice_intake_id": practice["intake_id"]}
         finally:
             store.conn.close()
