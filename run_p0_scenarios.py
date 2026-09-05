@@ -394,7 +394,12 @@ def run_wrong_course_filter_smoke():
             assert len(all_rows) == 2 and len(filtered) == 1
             assert filtered[0]["course_id"] == courses[0]["course_id"]
             assert filtered[0]["question_text"] == "课程隔离测试题 1"
-            return {"status": "passed", "all": len(all_rows), "filtered": len(filtered)}
+            navigation = store.knowledge_navigation()
+            assert len(navigation["subjects"]) == 2
+            assert {item["course_id"] for item in navigation["subjects"]} == {course["course_id"] for course in courses}
+            scoped_navigation = store.knowledge_navigation({"course_id": courses[0]["course_id"]})
+            assert len(scoped_navigation["subjects"]) == 1 and scoped_navigation["subjects"][0]["course_id"] == courses[0]["course_id"]
+            return {"status": "passed", "all": len(all_rows), "filtered": len(filtered), "knowledge_groups": len(navigation["subjects"])}
         finally:
             store.conn.close()
             app.ROOT = original_root

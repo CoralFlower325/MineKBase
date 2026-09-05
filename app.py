@@ -3354,6 +3354,7 @@ class Store:
     def knowledge_navigation(self, filters=None):
         filters = as_dict(filters)
         subject_filter = as_text(filters.get("subject_key")).strip()
+        course_filter = as_text(filters.get("course_id")).strip()
         chapter_filter = as_text(filters.get("chapter")).strip()
         knowledge_filter = as_text(filters.get("knowledge_point")).strip()
         subjects = {}
@@ -3364,9 +3365,12 @@ class Store:
         for row in rows:
             grading = as_dict(loads(row["grading_reference_fixture_snapshot"], {}))
             subject = as_text(grading.get("subject_key")).strip() or "unclassified"
+            course_id = as_text(grading.get("course_id")).strip()
             chapter = as_text(grading.get("chapter")).strip() or "待补充"
             knowledge = as_text(grading.get("knowledge_point")).strip() or "待补充"
             if subject_filter and subject != subject_filter:
+                continue
+            if course_filter and course_id != course_filter:
                 continue
             if chapter_filter and chapter != chapter_filter:
                 continue
@@ -3393,7 +3397,9 @@ class Store:
                 "attempts": attempt_items,
                 "sources": [{"source_passage_id": link.get("source_passage_id"), "source_artifact_id": link.get("source_artifact_id"), "text": link.get("text"), "page_no": link.get("page_no"), "locator_json": link.get("locator_json")} for link in links],
             }
-            subject_node = subjects.setdefault(subject, {"subject_key": subject, "label": labels.get(subject, subject), "chapters": {}})
+            course = self._course(course_id) if course_id else None
+            group_key = course_id or subject
+            subject_node = subjects.setdefault(group_key, {"subject_key": subject, "course_id": course_id or None, "label": course["course_name"] if course else labels.get(subject, subject), "chapters": {}})
             chapter_node = subject_node["chapters"].setdefault(chapter, {"chapter": chapter, "knowledge_points": {}})
             knowledge_node = chapter_node["knowledge_points"].setdefault(knowledge, {"knowledge_point": knowledge, "questions": [], "sources": []})
             knowledge_node["questions"].append(item)
