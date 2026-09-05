@@ -60,6 +60,11 @@ def run_image_smoke():
             wrong_detail_after_edit = store.get_wrong_question(question_id)
             assert wrong_detail_after_edit["question_text"] == "用户修正后的题面"
             assert wrong_detail_after_edit["grading"]["error_type"] == "method_selection"
+            try:
+                store.patch_intake(intake["intake_id"], {"draft_fields": {"error_type": "unsupported"}})
+                raise AssertionError("invalid intake error type was accepted")
+            except app.DomainError as error:
+                assert error.code == "invalid_error_type"
             initial_after_edit = store.get_attempt(initial_attempt_id)
             assert initial_after_edit["reference_answer"] == "待补充"
             wrong_detail = store.get_wrong_question(question_id)
@@ -75,6 +80,11 @@ def run_image_smoke():
             assert submitted["comparison_draft"]["error_type"] == "method_selection"
             edited_comparison = store.patch_attempt_draft(submitted["attempt_id"], {"error_type": "derivation_calculation"})
             assert edited_comparison["comparison_draft"]["error_type"] == "derivation_calculation"
+            try:
+                store.patch_attempt_draft(submitted["attempt_id"], {"error_type": "unsupported"})
+                raise AssertionError("invalid comparison error type was accepted")
+            except app.DomainError as error:
+                assert error.code == "invalid_error_type"
             assert initial_assets == set(app.as_dict(app.loads(store.one("SELECT response_snapshot FROM Attempt WHERE question_id=? AND origin_kind='initial'", (question_id,))["response_snapshot"], {})).get("response_assets", []))
             return {"status": "passed", "question_id": question_id, "initial_assets": len(initial_assets), "comparison": submitted["comparison_draft"]["status"]}
         finally:

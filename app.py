@@ -161,6 +161,14 @@ class DomainError(Exception):
         super().__init__(message)
 
 
+def validated_error_type(value):
+    """Keep the diagnosis contract to the three user-facing error types."""
+    value = as_text(value).strip()
+    if value and value not in ERROR_TYPES:
+        raise DomainError("invalid_error_type", "error_type must be one of the supported diagnosis types", {"error_type": value})
+    return value
+
+
 class Store:
     """The SQLite learning ledger and its small command surface."""
 
@@ -1359,6 +1367,8 @@ class Store:
                 for key in incoming_fields:
                     if key in {"question_text", "reference_answer", "subject_key", "chapter", "knowledge_point", "question_type", "difficulty", "error_type", "error_reason", "error_breakpoint", "correct_approach"} and incoming_fields.get(key) != draft.get(key):
                         field_sources[key] = as_text(incoming_sources.get(key)).strip() or "用户修改"
+                if "error_type" in incoming_fields:
+                    incoming_fields = {**incoming_fields, "error_type": validated_error_type(incoming_fields.get("error_type"))}
                 draft.update(incoming_fields)
                 if field_sources:
                     draft["field_sources"] = field_sources
@@ -2412,7 +2422,7 @@ class Store:
                 raise DomainError("invalid_knowledge_node", "knowledge node is not in the selected course", {"knowledge_node_id": knowledge_node_id})
             if knowledge_node and knowledge_node["confirmation_state"] == "candidate":
                 self.conn.execute("UPDATE KnowledgeNode SET confirmation_state='confirmed',origin='user' WHERE knowledge_node_id=?", (knowledge_node_id,))
-            grading = {"reference_answer":required["reference_answer"],"error_type":as_text(draft.get("error_type")),"error_reason":required["error_reason"],"error_breakpoint":required["error_breakpoint"],"correct_approach":as_text(draft.get("correct_approach")),"subject_key":subject,"course_id":row["course_id"],"knowledge_node_id":knowledge_node_id,"knowledge_point":knowledge_node["name"] if knowledge_node else draft.get("knowledge_point"),"chapter":draft.get("chapter"),"question_type":draft.get("question_type"),"difficulty":draft.get("difficulty"),"intake_id":intake_id,"asset_refs":asset_refs,"selected_question_id":draft.get("selected_question_id"),"selected_source_passage_ids":selected_source_ids,"answer_origin":as_text(draft.get("answer_origin")) or "model","answer_candidates":as_list(draft.get("answer_candidates")),"source_question_bank_item_id":as_text(draft.get("source_question_bank_item_id")).strip() or None,"bank_explanation":as_text(draft.get("bank_explanation")),"bank_source":as_text(draft.get("bank_source")),"bank_year":as_text(draft.get("bank_year")),"question_image_status":"已保存题面" if question_assets else "待补题面"}
+            grading = {"reference_answer":required["reference_answer"],"error_type":validated_error_type(draft.get("error_type")),"error_reason":required["error_reason"],"error_breakpoint":required["error_breakpoint"],"correct_approach":as_text(draft.get("correct_approach")),"subject_key":subject,"course_id":row["course_id"],"knowledge_node_id":knowledge_node_id,"knowledge_point":knowledge_node["name"] if knowledge_node else draft.get("knowledge_point"),"chapter":draft.get("chapter"),"question_type":draft.get("question_type"),"difficulty":draft.get("difficulty"),"intake_id":intake_id,"asset_refs":asset_refs,"selected_question_id":draft.get("selected_question_id"),"selected_source_passage_ids":selected_source_ids,"answer_origin":as_text(draft.get("answer_origin")) or "model","answer_candidates":as_list(draft.get("answer_candidates")),"source_question_bank_item_id":as_text(draft.get("source_question_bank_item_id")).strip() or None,"bank_explanation":as_text(draft.get("bank_explanation")),"bank_source":as_text(draft.get("bank_source")),"bank_year":as_text(draft.get("bank_year")),"question_image_status":"已保存题面" if question_assets else "待补题面"}
             presentation = {"schema_version":SNAPSHOT,"content":question_text,"blocks":[{"block_ref":"question","kind":"text","content":question_text,"leakage_state":"clean"}],"asset_refs":presentation_refs}
             self.conn.execute("INSERT INTO Question(question_id,course_pack_release_id,current_question_revision_id,lifecycle_state,created_at) VALUES(?,?,?,?,?)", (question_id,release_id,None,"active",created))
             self.conn.execute("INSERT INTO QuestionRevision(question_revision_id,question_id,revision_no,revision_state,supersedes_revision_id,current_review_prompt_revision_id,question_units,objective_mapping_snapshot,grading_reference_fixture_snapshot,help_content_fixture_snapshot,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)", (revision_id,question_id,1,"confirmed",None,None,dumps(units),dumps(mapping),dumps(grading),dumps([]),created))
@@ -2644,7 +2654,7 @@ class Store:
                 raise DomainError("review_closed", "该 Attempt 不是可编辑的比较草稿", {"attempt_id": attempt_id})
             for key in ("error_type", "error_reason", "error_breakpoint", "correct_approach"):
                 if key in payload:
-                    comparison[key] = as_text(payload.get(key))
+                    comparison[key] = validated_error_type(payload.get(key)) if key == "error_type" else as_text(payload.get(key))
             comparison["status"] = comparison.get("status") or "draft"
             current_response["comparison_draft"] = comparison
             self.begin()
