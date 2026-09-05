@@ -3110,7 +3110,10 @@ class Store:
                     raise DomainError("invalid_self_assessment", "state must be know, dont_know, uncertain, or full_redo")
                 draft = self._draft(loads(session["draft_payload_snapshot"], {}))
                 draft["self_assessment"] = state
-                draft["full_redo_requested"] = state == "full_redo" or bool(payload.get("full_redo"))
+                # “不会” follows the product flow into a complete redo by
+                # default; “会/不确定” remain finishable without forcing
+                # another upload, while “完整重做” is always explicit.
+                draft["full_redo_requested"] = state in {"dont_know", "full_redo"} or bool(payload.get("full_redo"))
                 self.conn.execute("UPDATE ReviewSession SET draft_payload_snapshot=?,updated_at=?,status=CASE WHEN status='abandoned' THEN 'active' ELSE status END,ended_at=CASE WHEN status='abandoned' THEN NULL ELSE ended_at END WHERE review_session_id=?", (dumps(draft), self.clock(), session_id))
                 self.commit()
                 return {"review_session_id": session_id, "status": "active", "self_assessment": state, "full_redo_requested": draft["full_redo_requested"], "draft": draft}

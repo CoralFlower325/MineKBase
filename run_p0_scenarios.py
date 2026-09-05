@@ -342,6 +342,57 @@ def run_wrong_course_filter_smoke():
             store.conn.close()
             app.ROOT = original_root
 
+
+def run_review_self_assessment_smoke():
+    """Verify self-assessment routes: 不会 enters redo; 会 can finish directly."""
+    original_root = app.ROOT
+    with tempfile.TemporaryDirectory(prefix="review-self-assessment-") as directory:
+        root = Path(directory)
+        (root / "schema.sql").write_text((original_root / "schema.sql").read_text(), encoding="utf-8")
+        app.ROOT = root
+        store = app.Store(root / "review.sqlite", lambda: "2026-09-05T00:00:00Z")
+        try:
+            course = store.create_course({"course_group": "数学考研", "course_name": "数学一", "subject_key": "math"})
+
+            def confirmed_question(label):
+                intake = store.create_intake_batch([], course_id=course["course_id"])
+                store.patch_intake(intake["intake_id"], {"draft_fields": {
+                    "analysis_status": "draft",
+                    "question_text": f"自评路由测试题 {label}",
+                    "reference_answer": "参考解",
+                    "error_reason": "知识点待确认",
+                    "error_breakpoint": "第一次尝试时",
+                }})
+                return store.confirm_intake(intake["intake_id"])
+
+            first = confirmed_question("不会")
+            first_task = store.one("SELECT review_task_id FROM ReviewTask WHERE question_id=? AND status='open'", (first["question_id"],))
+            first_session = store.start_review(first_task["review_task_id"])
+            routed = store.session_action(first_session["review_session_id"], "self_assess", {"state": "dont_know"})
+            assert routed["full_redo_requested"] is True
+            assert routed["draft"]["self_assessment"] == "dont_know"
+            store.session_action(first_session["review_session_id"], "abandon", {"draft": routed["draft"]})
+
+            second = confirmed_question("会")
+            second_task = store.one("SELECT review_task_id FROM ReviewTask WHERE question_id=? AND status='open'", (second["question_id"],))
+            second_session = store.start_review(second_task["review_task_id"])
+            chosen = store.session_action(second_session["review_session_id"], "self_assess", {"state": "know"})
+            assert chosen["full_redo_requested"] is False
+            finished = store.session_action(second_session["review_session_id"], "submit", {"draft": {
+                "self_assessment": "know",
+                "completion_claim": "unknown",
+                "response_text": "",
+                "response_assets": [],
+                "external_help_reported": False,
+            }})
+            assert finished["status"] == "submitted" and finished["attempt_id"]
+            response = app.loads(store.one("SELECT response_snapshot FROM Attempt WHERE attempt_id=?", (finished["attempt_id"],))[0], {})
+            assert response["self_assessment"] == "know"
+            return {"status": "passed", "full_redo_default": routed["full_redo_requested"], "finished_attempt": finished["attempt_id"]}
+        finally:
+            store.conn.close()
+            app.ROOT = original_root
+
 def main():
     if len(sys.argv) > 1 and sys.argv[1] == "SIMILAR-PRACTICE-INTAKE":
         print(json.dumps({"runner": "run_p0_scenarios", "results": [{"scenario_id": "SIMILAR-PRACTICE-INTAKE", "status": run_similar_practice_intake_smoke()["status"]}]}, ensure_ascii=False, indent=2))
@@ -362,5 +413,6 @@ def main():
     results.append({'scenario_id':'KNOWLEDGE-CANDIDATE-SMOKE','status':run_knowledge_candidate_smoke()['status']})
     results.append({'scenario_id':'POLITICS-BANK-SMOKE','status':run_politics_bank_smoke()['status']})
     results.append({'scenario_id':'WRONG-COURSE-FILTER-SMOKE','status':run_wrong_course_filter_smoke()['status']})
+    results.append({'scenario_id':'REVIEW-SELF-ASSESSMENT-SMOKE','status':run_review_self_assessment_smoke()['status']})
     print(json.dumps({'runner':'run_p0_scenarios','results':results},ensure_ascii=False,indent=2))
 if __name__=='__main__': main()
