@@ -33,7 +33,7 @@
 - `notify_due.py` 和配套 LaunchAgent 脚本已提供每日一次、隐私友好的到期任务合并提醒；通知进程只读 SQLite，不写任务或调用模型。
 - 资料与回答接入保持四件薄对象：`SourceArtifact`、`SourcePassage`、`QuestionSourceLink`、`Answer`；回答状态 `grounded/unlocated/unavailable` 是结果状态，不是流程门禁。
 - 资料收录支持浏览器 multipart PDF/PNG/JPG/DOCX 和普通静态网页 URL；上传文件原件立即保存到 `objects/sources/`，网页 URL 先写入 `SourceArtifact`，增强抓取成功后再保存 HTML 原件；增强复用 `SourcePassage`/FTS。文字 PDF 按页解析，扫描 PDF 的空文字页和直接上传的资料图片在增强时懒加载 PaddleOCR；OCR 依赖不可用时保留原文件并标记 unavailable。DOCX 使用懒加载的 `python-docx` 提取段落和表格单元格并保留 locator；网页抓取优先使用可选 trafilatura，缺失时回退标准库 HTMLParser，HTML 原文件保留且 passage locator 含 URL。OCR 只服务资料检索，不处理手写解题事实。图片错题分析会先读原图；有资料召回时再把带页码/locator 的候选交给二次分析，无召回或模型不可用时仍保留原文件和可编辑草稿。
-- `GET/POST /api/knowledge-nodes` 提供课程独立的个人知识树；错题分析中的章节/知识点会先自动写成候选节点，用户在分析编辑器中选择后再确认成正式节点，题目绑定也会随确认写入。资料和题库反复出现的同课程标签会做保守的空格/标点归并，并保留原标签别名供确认；更复杂的跨资料语义聚类仍以后续迭代为限。
+- `GET/POST /api/knowledge-nodes` 提供课程独立的个人知识树；错题分析中的章节/知识点会先自动写成候选节点，首页知识导航支持在确认前修改候选名称和上级章节，确认后才成为正式节点，题目绑定也会随确认写入。资料和题库反复出现的同课程标签会做保守的空格/标点归并，并保留原标签别名供确认；更复杂的跨资料语义聚类仍以后续迭代为限。
 
 ## 启动
 
