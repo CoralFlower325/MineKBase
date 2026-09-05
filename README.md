@@ -8,7 +8,7 @@
 
 当前产品主线是数学一、408、可自定义的电子类专业课，以及独立的政治选择题库。首次启动会提供数学一、408、信号与系统、政治四个默认课程，首页“新建专业课”或 `GET/POST /api/courses` 都可以创建自定义课程。课程选择会随题目和资料保存，旧 `subject_key` 仍作为兼容字段保留。
 
-个人知识节点可以通过 `GET/POST /api/knowledge-nodes` 按课程创建和查看，候选节点可用 `PATCH /api/knowledge-nodes/:id` 确认或归档；首页知识导航会单独显示待确认候选。已确认题目可绑定同课程节点。题库第一版支持 JSON API 或 multipart CSV/JSON 导入：先调用 `POST /api/question-bank/preview` 逐行校验，再调用 `POST /api/question-bank/import` 写入；行中提供 `chapter + knowledge_point` 且未指定节点时，导入会在对应课程下生成候选节点并绑定题目，仍需用户确认节点。首页维护列表和 `PATCH /api/question-bank/:id` 支持按课程逐题修正；勾选多题后可批量改章节、题型、难度和解析，底层 `PATCH /api/question-bank` 同样支持批量更新，维护时不能更换课程。相似题详情现在可以直接按知识点、章节、题型和难度调整筛选；`GET /api/wrong-questions/:id/similar` 接受这些筛选参数并始终限制在当前课程内。相似题可以通过 `POST /api/question-bank/:id/start` 转成待确认练习草稿，只有确认后才进入正式错题本。政治题库行可携带 `options`、`reference_answer`、`explanation`，首页支持按章节加载政治选择题并通过 `POST /api/question-bank/:id/answer` 判断对错，错答记录可从 `GET /api/question-bank/attempts` 查询。错题诊断中的错误类型固定为“知识点不会 / 方法选择错误 / 推导或计算出错”，同时保留原因和首次错误步骤文本。当前仍缺独立练习结果统计。
+个人知识节点可以通过 `GET/POST /api/knowledge-nodes` 按课程创建和查看，候选节点可用 `PATCH /api/knowledge-nodes/:id` 确认或归档；首页知识导航会单独显示待确认候选。已确认题目可绑定同课程节点。题库第一版支持 JSON API 或 multipart CSV/JSON 导入：先调用 `POST /api/question-bank/preview` 逐行校验，再调用 `POST /api/question-bank/import` 写入；行中提供 `chapter + knowledge_point` 且未指定节点时，导入会在对应课程下生成候选节点并绑定题目，仍需用户确认节点；当前文件内重复题目 ID 会在预览阶段报错。首页维护列表和 `PATCH /api/question-bank/:id` 支持按课程逐题修正；勾选多题后可批量改章节、题型、难度和解析，底层 `PATCH /api/question-bank` 同样支持批量更新，维护时不能更换课程。相似题详情现在可以直接按知识点、章节、题型和难度调整筛选；`GET /api/wrong-questions/:id/similar` 接受这些筛选参数并始终限制在当前课程内。相似题可以通过 `POST /api/question-bank/:id/start` 转成待确认练习草稿，只有确认后才进入正式错题本。政治题库行可携带 `options`、`reference_answer`、`explanation`，首页支持按章节加载政治选择题并通过 `POST /api/question-bank/:id/answer` 判断对错，错答记录可从 `GET /api/question-bank/attempts` 查询。错题诊断中的错误类型固定为“知识点不会 / 方法选择错误 / 推导或计算出错”，同时保留原因和首次错误步骤文本。独立练习结果统计按当前用户边界后置，不记录大规模学习数据。
 
 政治题库的 JSON 行可以写成 `{"course_id":"course-politics","chapter":"马克思主义基本原理","question_text":"题面","options":{"A":"选项一","B":"选项二"},"reference_answer":"B","explanation":"解析"}`；CSV 的 `options` 列也支持 `A. 选项一|B. 选项二` 这种简写。
 
@@ -133,7 +133,7 @@ python3 run_p0_scenarios.py
 4. 资料解析已完成最小闭环：文字 PDF 使用现有 `pypdf` 按页提取；扫描 PDF 的空文字页和直接上传的资料图片使用可选、懒加载的 PaddleOCR（PDF 光栅化需要 `pypdfium2` 或 `fitz`；依赖缺失时保留原文件并返回 `unavailable`）；DOCX 使用懒加载 `python-docx` 提取段落和表格单元格。所有结果写入同一套 `SourcePassage`、FTS 和 page/locator；OCR 只用于资料检索，复杂版面仍不宣称完全覆盖。浏览器会在保存后逐份自动增强，并提供最近资料列表。
 5. Context Composer + LLM 薄切片已完成：先使用已关联 passage，再合并现有 FTS 命中，返回服务端实际出处；未定位或 LLM 不可用都不阻断保存。
 6. 只有真实需要跨章节、多跳关系时才接入一个 [LightRAG](https://github.com/HKUDS/LightRAG) REST sidecar；不同时运行两套图/向量索引。若需要更强布局解析，再单独评估 [Docling](https://github.com/docling-project/docling)。
-7. 数学一与可配置专业课的图片错题按确认时间依次安排 +3/+7/+10/+14 天，第 14 天后停止自动排程；回测分流和真实题库相似题筛选、转待确认练习草稿的第一版已按 `design.md` 的 P3/P4 落地，后续补导入质量反馈和独立练习结果统计。政治选择题库后置，英语暂不开发；旧文字演示链仅用于迁移，FSRS 后置。
+7. 数学一与可配置专业课的图片错题按确认时间依次安排 +3/+7/+10/+14 天，第 14 天后停止自动排程；回测分流、真实题库相似题筛选、转待确认练习草稿和题库导入质量反馈的第一版已按 `design.md` 的 P3/P4 落地。独立练习结果统计按当前用户边界后置；政治选择题库已进入第二阶段，英语暂不开发；旧文字演示链仅用于迁移，FSRS 后置。
 
 原则只有一句：用户输入先落库，增强过程后补；状态和提示帮助用户判断，不把不完整变成阻碍。
 
