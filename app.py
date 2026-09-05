@@ -1232,6 +1232,7 @@ class Store:
             "user_material": "用户资料候选",
             "question_bank": "题库导入",
             "model": "模型候选",
+            "user_edit": "用户手动修改",
         }.get(as_text(draft.get("answer_origin")), "模型候选")
         for key in (
             "question_text", "reference_answer", "subject_key", "chapter",
@@ -1325,12 +1326,15 @@ class Store:
             if isinstance(payload.get("draft_fields"), dict):
                 incoming_fields = payload["draft_fields"]
                 field_sources = dict(draft.get("field_sources")) if isinstance(draft.get("field_sources"), dict) else {}
+                incoming_sources = as_dict(incoming_fields.get("field_sources"))
                 for key in incoming_fields:
                     if key in {"question_text", "reference_answer", "subject_key", "chapter", "knowledge_point", "question_type", "error_type", "error_reason", "error_breakpoint", "correct_approach"} and incoming_fields.get(key) != draft.get(key):
-                        field_sources[key] = "用户修改"
+                        field_sources[key] = as_text(incoming_sources.get(key)).strip() or "用户修改"
                 draft.update(incoming_fields)
                 if field_sources:
                     draft["field_sources"] = field_sources
+                if "reference_answer" in incoming_fields and field_sources.get("reference_answer", "").startswith("用户修改"):
+                    draft["answer_origin"] = "user_edit"
                 if confirmed and "subject_key" in payload["draft_fields"]:
                     subject_value = payload["draft_fields"].get("subject_key") or None
                     if subject_value not in SUBJECT_KEYS:
@@ -1423,7 +1427,7 @@ class Store:
         if not revision:
             return
         grading = as_dict(loads(revision["grading_reference_fixture_snapshot"], {}))
-        for key in ("reference_answer", "error_reason", "error_breakpoint", "correct_approach", "chapter", "knowledge_point", "question_type"):
+        for key in ("reference_answer", "answer_origin", "error_reason", "error_breakpoint", "correct_approach", "chapter", "knowledge_point", "question_type"):
             if key in draft:
                 grading[key] = as_text(draft.get(key))
         if "subject_key" in draft:
@@ -2295,9 +2299,10 @@ class Store:
         has_source = any(c.get("kind")=="source" for c in candidates)
         answer_candidates = self._answer_candidates(draft, row["batch_id"], candidates)
         knowledge_candidates = self._ensure_knowledge_candidates(row["course_id"], tag_candidates)
-        manual_answer = as_text(as_dict(draft.get("field_sources")).get("reference_answer")).startswith(("用户修改", "用户选择"))
+        answer_source_marker = as_text(as_dict(draft.get("field_sources")).get("reference_answer"))
+        manual_answer = answer_source_marker.startswith(("用户修改", "用户选择"))
         current_origin = as_text(draft.get("answer_origin"))
-        answer_origin = current_origin if manual_answer and current_origin else (answer_candidates[0]["origin"] if answer_candidates else "model")
+        answer_origin = "user_edit" if answer_source_marker.startswith("用户修改") else current_origin if manual_answer and current_origin else (answer_candidates[0]["origin"] if answer_candidates else "model")
         draft.update({"retrieval_query": query, "resolution_kind":"matched" if has_question else "model", "resolution_label":"匹配题目" if has_question else "资料参考" if has_source else "待补充", "match_candidates":candidates, "source_refs":source_refs, "tag_candidates":tag_candidates, "knowledge_node_candidates":knowledge_candidates, "answer_candidates":answer_candidates, "answer_conflict":len(answer_candidates) > 1, "answer_origin":answer_origin})
         self.begin()
         try:

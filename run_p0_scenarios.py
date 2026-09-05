@@ -195,6 +195,7 @@ def run_question_bank_smoke():
                 "chapter": "数字逻辑",
                 "question_type": "选择题",
                 "knowledge_node_id": node["knowledge_node_id"],
+                "field_sources": {"reference_answer": "模型候选"},
             }})
             resolved = store.resolve_intake(answer_intake["intake_id"])
             answer_candidates = resolved["draft_fields"]["answer_candidates"]
@@ -202,6 +203,24 @@ def run_question_bank_smoke():
             confirmed_answer = store.confirm_intake(answer_intake["intake_id"])
             grading = store.one("SELECT grading_reference_fixture_snapshot FROM QuestionRevision WHERE question_id=?", (confirmed_answer["question_id"],))
             assert app.loads(grading[0], {})["answer_origin"] == "reference_image"
+            manual_answer_intake = store.create_intake_batch([], course_id=course["course_id"])
+            store.patch_intake(manual_answer_intake["intake_id"], {"draft_fields": {
+                "analysis_status": "draft",
+                "question_text": "用户手动修改答案来源测试题",
+                "reference_answer": "模型暂定答案",
+                "error_reason": "答案来源测试",
+                "error_breakpoint": "首次检查答案时",
+            }})
+            store.patch_intake(manual_answer_intake["intake_id"], {"draft_fields": {"reference_answer": "用户手写参考解"}})
+            manual_detail = store._intake_detail(manual_answer_intake["intake_id"])
+            assert manual_detail["draft_fields"]["answer_origin"] == "user_edit"
+            assert manual_detail["draft_fields"]["field_sources"]["reference_answer"] == "用户修改"
+            manual_confirmed = store.confirm_intake(manual_answer_intake["intake_id"])
+            manual_grading = store.one("SELECT grading_reference_fixture_snapshot FROM QuestionRevision WHERE question_id=?", (manual_confirmed["question_id"],))
+            assert app.loads(manual_grading[0], {})["answer_origin"] == "user_edit"
+            store.patch_intake(manual_answer_intake["intake_id"], {"draft_fields": {"reference_answer": "用户再次修订参考解"}})
+            synced_grading = store.one("SELECT grading_reference_fixture_snapshot FROM QuestionRevision WHERE question_id=?", (manual_confirmed["question_id"],))
+            assert app.loads(synced_grading[0], {})["answer_origin"] == "user_edit"
             before_questions = store.one("SELECT COUNT(*) AS count FROM Question")["count"]
             practice = store.start_question_bank_item(filtered[0]["question_bank_item_id"])
             practice_draft = practice["draft_fields"]
