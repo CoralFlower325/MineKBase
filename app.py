@@ -2287,6 +2287,16 @@ class Store:
                 assets.append(item)
         return assets
 
+    def _process_assets_from_refs(self, refs):
+        assets = []
+        for ref in [as_dict(ref) for ref in as_list(refs) if as_dict(ref).get("role") == "my_process"]:
+            asset = self.one("SELECT * FROM ImageAsset WHERE asset_id=? AND state='saved' AND path IS NOT NULL", (ref.get("asset_id"),))
+            if asset:
+                item = self._asset_dict(asset)
+                item["review_role"] = "my_process"
+                assets.append(item)
+        return assets
+
     def _wrong_dto(self, question_id):
         question = self.one("SELECT * FROM Question WHERE question_id=?", (question_id,))
         if not question: return None
@@ -2304,6 +2314,7 @@ class Store:
         refs = presentation.get("asset_refs") if isinstance(presentation.get("asset_refs"), list) else []
         assets, question_image_status = self._question_assets_from_refs(refs)
         reference_assets = self._reference_assets_from_refs(as_dict(grading).get("asset_refs"))
+        process_assets = self._process_assets_from_refs(as_dict(grading).get("asset_refs"))
         intake_row = self.one("SELECT batch_id FROM IntakeItem WHERE intake_id=?", (grading.get("intake_id"),))
         editable_assets = []
         if intake_row:
@@ -2319,7 +2330,7 @@ class Store:
             if draft_attempt_id:
                 draft_assets = self._redo_assets(grading.get("intake_id"), as_list(raw_draft.get("response_assets")))
                 redo_draft = {"attempt_id": draft_attempt_id, "review_session_id": active_session["review_session_id"], "review_task_id": active_session["review_task_id"], "response_text": as_text(raw_draft.get("response_text")), "response_assets": [a["asset_id"] for a in draft_assets], "assets": draft_assets}
-        return {"question_id":question_id,"question":dict(question),"question_revision":dict(revision),"question_text":as_text((presentation.get("content") if isinstance(presentation,dict) else "")),"presentation":presentation,"assets":assets,"editable_assets":editable_assets,"intake_id":grading.get("intake_id"),"course_id":grading.get("course_id"),"course_name":course["course_name"] if course else None,"course_group":course["course_group"] if course else None,"reference_assets":reference_assets,"question_image_status":question_image_status,"data_origin":data_origin,"display_label":as_text(grading.get("display_label")) or "真实题目","grading":grading,"knowledge_nodes":knowledge_nodes,"sources":sources,"answers":self.get_question_answers(question_id),"next_due_at":task["due_at"] if task else None,"review_task_id":task["review_task_id"] if task else None,"next_task":self._task_summary(task),"redo_draft":redo_draft,"latest_redo_attempt_id":latest_redo["attempt_id"] if latest_redo else None}
+        return {"question_id":question_id,"question":dict(question),"question_revision":dict(revision),"question_text":as_text((presentation.get("content") if isinstance(presentation,dict) else "")),"presentation":presentation,"assets":assets,"process_assets":process_assets,"editable_assets":editable_assets,"intake_id":grading.get("intake_id"),"course_id":grading.get("course_id"),"course_name":course["course_name"] if course else None,"course_group":course["course_group"] if course else None,"reference_assets":reference_assets,"question_image_status":question_image_status,"data_origin":data_origin,"display_label":as_text(grading.get("display_label")) or "真实题目","grading":grading,"knowledge_nodes":knowledge_nodes,"sources":sources,"answers":self.get_question_answers(question_id),"next_due_at":task["due_at"] if task else None,"review_task_id":task["review_task_id"] if task else None,"next_task":self._task_summary(task),"redo_draft":redo_draft,"latest_redo_attempt_id":latest_redo["attempt_id"] if latest_redo else None}
 
     def list_wrong_questions(self, filters=None):
         """Return confirmed intake-backed questions, optionally filtered by tags.

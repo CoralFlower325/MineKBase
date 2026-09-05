@@ -25,7 +25,7 @@ def run_image_smoke():
             asset_ids = [asset["asset_id"] for asset in intake["assets"]]
             assert len(asset_ids) == 2
             store.patch_intake(intake["intake_id"], {"assets": [
-                {"asset_id": asset_ids[0], "ordinal": 2},
+                {"asset_id": asset_ids[0], "ordinal": 2, "role": "my_process"},
                 {"asset_id": asset_ids[1], "ordinal": 1, "role": "question"},
             ]})
             failed = store.analyze_intake(intake["intake_id"])
@@ -34,6 +34,8 @@ def run_image_smoke():
             confirmed = store.confirm_intake(intake["intake_id"])
             assert confirmed["confirmed"] and confirmed["due_at"].startswith("2026-09-08")
             question_id = confirmed["question_id"]
+            wrong_detail = store.get_wrong_question(question_id)
+            assert any((asset.get("review_role") or asset.get("role")) == "my_process" for asset in wrong_detail["process_assets"])
             initial = store.one("SELECT response_snapshot FROM Attempt WHERE question_id=? AND origin_kind='initial'", (question_id,))
             initial_assets = set(app.as_dict(app.loads(initial["response_snapshot"], {})).get("response_assets", []))
             task = store.one("SELECT review_task_id FROM ReviewTask WHERE question_id=? AND status='open'", (question_id,))
