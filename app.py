@@ -650,7 +650,9 @@ class Store:
                 raise DomainError("invalid_knowledge_node", "knowledge node is not in the question course", {"knowledge_node_id": requested_node})
             node_id = requested_node
             explicit["knowledge_node_id"] = requested_node
-        candidates = self.list_question_bank({"course_id": values["course_id"], "limit": limit * 4}) if values["course_id"] else []
+        bank_filters = {"course_id": values["course_id"], "limit": limit * 4} if values["course_id"] else {}
+        bank_filters.update({key: value for key, value in explicit.items() if key in {"knowledge_node_id", "chapter", "question_type", "difficulty"}})
+        candidates = self.list_question_bank(bank_filters) if values["course_id"] else []
         scored = []
         for candidate in candidates:
             if candidate["question_bank_item_id"] == question_id:
