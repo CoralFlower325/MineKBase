@@ -18,6 +18,7 @@ import mimetypes
 import sqlite3
 import tempfile
 import threading
+import unicodedata
 import uuid
 import os
 import urllib.request
@@ -80,6 +81,12 @@ def add_days(value: str, days: int) -> str:
     return (parse_time(value) + dt.timedelta(days=days)).strftime(
         "%Y-%m-%dT%H:%M:%SZ"
     )
+
+
+def knowledge_label_key(value: str) -> str:
+    """Create a conservative course-local key for merging label variants."""
+    text = unicodedata.normalize("NFKC", as_text(value)).strip().casefold()
+    return "".join(char for char in text if not char.isspace() and char not in "·•:：,，;；-—_()（）[]【】")
 
 
 def dumps(value) -> str:
@@ -367,21 +374,34 @@ class Store:
             for chapter, point, origin in pairs:
                 parent_id = None
                 if chapter:
-                    parent = self.one("SELECT * FROM KnowledgeNode WHERE course_id=? AND parent_id IS NULL AND name=? AND confirmation_state!='archived' ORDER BY created_at LIMIT 1", (course_id, chapter))
+                    parents = self.all("SELECT * FROM KnowledgeNode WHERE course_id=? AND parent_id IS NULL AND confirmation_state!='archived' ORDER BY created_at", (course_id,))
+                    parent = next((row for row in parents if knowledge_label_key(row["name"]) == knowledge_label_key(chapter) or chapter in loads(row["aliases"], [])), None)
                     if not parent:
                         parent_id = uid("kn")
                         self.conn.execute("INSERT INTO KnowledgeNode(knowledge_node_id,course_id,parent_id,name,aliases,origin,confirmation_state,created_at) VALUES(?,?,?,?,?,?,?,?)", (parent_id, course_id, None, chapter, dumps([]), origin, "candidate", created))
                     else:
                         parent_id = parent["knowledge_node_id"]
+                        aliases = loads(parent["aliases"], [])
+                        if chapter != parent["name"] and chapter not in aliases:
+                            aliases.append(chapter)
+                            self.conn.execute("UPDATE KnowledgeNode SET aliases=? WHERE knowledge_node_id=?", (dumps(aliases), parent_id))
                     result.append(dict(self.one("SELECT * FROM KnowledgeNode WHERE knowledge_node_id=?", (parent_id,))))
                 if point:
-                    query = "SELECT * FROM KnowledgeNode WHERE course_id=? AND name=? AND confirmation_state!='archived' AND parent_id " + ("IS NULL" if parent_id is None else "=?") + " ORDER BY created_at LIMIT 1"
-                    args = (course_id, point) if parent_id is None else (course_id, point, parent_id)
-                    node = self.one(query, args)
+                    if parent_id is None:
+                        nodes = self.all("SELECT * FROM KnowledgeNode WHERE course_id=? AND confirmation_state!='archived' AND parent_id IS NULL ORDER BY created_at", (course_id,))
+                    else:
+                        nodes = self.all("SELECT * FROM KnowledgeNode WHERE course_id=? AND confirmation_state!='archived' AND parent_id=? ORDER BY created_at", (course_id, parent_id))
+                    node = next((row for row in nodes if knowledge_label_key(row["name"]) == knowledge_label_key(point) or point in loads(row["aliases"], [])), None)
                     if not node:
                         node_id = uid("kn")
                         self.conn.execute("INSERT INTO KnowledgeNode(knowledge_node_id,course_id,parent_id,name,aliases,origin,confirmation_state,created_at) VALUES(?,?,?,?,?,?,?,?)", (node_id, course_id, parent_id, point, dumps([]), origin, "candidate", created))
                         node = self.one("SELECT * FROM KnowledgeNode WHERE knowledge_node_id=?", (node_id,))
+                    elif point != node["name"]:
+                        aliases = loads(node["aliases"], [])
+                        if point not in aliases:
+                            aliases.append(point)
+                            self.conn.execute("UPDATE KnowledgeNode SET aliases=? WHERE knowledge_node_id=?", (dumps(aliases), node["knowledge_node_id"]))
+                            node = self.one("SELECT * FROM KnowledgeNode WHERE knowledge_node_id=?", (node["knowledge_node_id"],))
                     result.append(dict(node))
             self.commit()
             unique = {}

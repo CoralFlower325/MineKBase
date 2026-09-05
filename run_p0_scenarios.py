@@ -235,6 +235,10 @@ def run_knowledge_candidate_smoke():
             assert long_candidates[0]["source_excerpted"] and "资料较长" in long_candidates[0]["answer"] and long_candidates[0]["source_text"]
             point = next(node for node in nodes if node["name"] == "二叉树遍历")
             assert point["confirmation_state"] == "candidate" and point["course_id"] == course["course_id"]
+            merged = store._ensure_knowledge_candidates(course["course_id"], [{"chapter": "树与图 ", "knowledge_point": "二叉树 遍历", "origin": "source_heading"}])
+            merged_point = next(node for node in merged if node["name"] == "二叉树遍历")
+            assert merged_point["knowledge_node_id"] == point["knowledge_node_id"]
+            assert "二叉树 遍历" in app.loads(store.one("SELECT aliases FROM KnowledgeNode WHERE knowledge_node_id=?", (point["knowledge_node_id"],))[0], [])
             promoted = store.update_knowledge_node(point["knowledge_node_id"], {"confirmation_state": "confirmed"})
             assert promoted["confirmation_state"] == "confirmed" and promoted["origin"] == "user"
             ignored = store.create_knowledge_node({"course_id": course["course_id"], "name": "不相关候选", "origin": "source_heading"})
