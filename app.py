@@ -2620,7 +2620,7 @@ class Store:
                 grading = as_dict(item.get("grading"))
                 if any(as_text(grading.get(key)).strip() != value for key, value in filters.items()):
                     continue
-                result.append({"question_id":item["question_id"],"question_text":item["question_text"],"subject_key":grading.get("subject_key"),"course_id":item.get("course_id"),"course_name":item.get("course_name"),"chapter":grading.get("chapter"),"knowledge_point":grading.get("knowledge_point"),"question_type":grading.get("question_type"),"error_type":grading.get("error_type"),"asset_count":len(item["assets"]),"reference_answer":grading.get("reference_answer"),"error_reason":grading.get("error_reason"),"error_breakpoint":grading.get("error_breakpoint"),"next_due_at":item["next_due_at"],"data_origin":item.get("data_origin"),"display_label":item.get("display_label")})
+                result.append({"question_id":item["question_id"],"question_text":item["question_text"],"subject_key":grading.get("subject_key"),"course_id":item.get("course_id"),"course_name":item.get("course_name"),"chapter":grading.get("chapter"),"knowledge_point":grading.get("knowledge_point"),"question_type":grading.get("question_type"),"error_type":grading.get("error_type"),"asset_count":len(item["assets"]),"reference_answer":grading.get("reference_answer"),"answer_origin":grading.get("answer_origin"),"field_sources":as_dict(grading.get("field_sources")),"error_reason":grading.get("error_reason"),"error_breakpoint":grading.get("error_breakpoint"),"next_due_at":item["next_due_at"],"data_origin":item.get("data_origin"),"display_label":item.get("display_label")})
         return result
 
     def get_wrong_question(self, question_id):

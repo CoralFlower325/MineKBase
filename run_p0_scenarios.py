@@ -489,6 +489,7 @@ def run_wrong_course_filter_smoke():
             assert len(type_filtered) == 1 and type_filtered[0]["course_id"] == courses[0]["course_id"]
             assert filtered[0]["course_id"] == courses[0]["course_id"]
             assert filtered[0]["question_text"] == "课程隔离测试题 1"
+            assert filtered[0]["answer_origin"] in {"model", "user_edit"} and filtered[0]["field_sources"]
             exported = store.export_wrong_questions(include_answers=False)
             assert "- 课程：信号与系统（电子类考研）" in exported
             assert "- 课程：数字电路（电子类考研）" in exported
