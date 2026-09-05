@@ -1374,6 +1374,26 @@ class Store:
         if not path.is_file(): return None
         return path, (row["mime"] or "application/octet-stream"), row["original_filename"]
 
+    def _source_heading_candidates(self, artifact_id, course_id):
+        """Turn explicit material headings into reviewable course candidates."""
+        course_id = as_text(course_id).strip()
+        if not course_id:
+            return []
+        import re
+        heading_pattern = re.compile(r"^(?:第[一二三四五六七八九十百千万0-9]+[章节篇]|[0-9]+(?:\.[0-9]+)*\s+|[一二三四五六七八九十百千万]+、).{1,70}$")
+        headings = []
+        seen = set()
+        rows = self.all("SELECT text FROM SourcePassage WHERE source_artifact_id=? ORDER BY ordinal", (artifact_id,))
+        for row in rows:
+            for raw_line in as_text(row["text"]).replace("\r\n", "\n").split("\n"):
+                line = re.sub(r"^[#>*\-\s]+", "", raw_line).strip()
+                line = re.sub(r"[：:；;，,。．.]+$", "", line).strip()
+                if not line or len(line) < 3 or len(line) > 80 or line in seen or not heading_pattern.match(line):
+                    continue
+                seen.add(line)
+                headings.append(line)
+        return self._ensure_knowledge_candidates(course_id, [{"chapter": heading, "origin": "source_heading"} for heading in headings[:50]])
+
     def enrich_source(self, artifact_id):
         self.begin()
         try:
@@ -1582,6 +1602,8 @@ class Store:
             self.conn.execute("UPDATE SourceArtifact SET raw_text=?,raw_payload=COALESCE(?,raw_payload),parse_state=? WHERE source_artifact_id=?", (text_value, dumps(payload) if payload is not None else None, "unavailable" if parse_warning else "ready", artifact_id))
             self.commit()
             result = {"source_artifact_id": artifact_id, "parse_state": "unavailable" if parse_warning else "ready", "source_passage_ids": passage_ids}
+            if not parse_warning:
+                result["knowledge_node_candidates"] = self._source_heading_candidates(artifact_id, artifact["course_id"])
             if parse_warning:
                 result["error"] = parse_warning
             return result

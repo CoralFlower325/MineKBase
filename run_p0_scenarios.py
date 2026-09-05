@@ -59,11 +59,14 @@ def run_fts_fallback_smoke():
         store = app.Store(root / "fts.sqlite", lambda: "2026-09-05T00:00:00Z")
         try:
             assert store.conn.execute("PRAGMA user_version").fetchone()[0] == 4
-            artifact = store.capture_source({"source_name": "教材", "raw_text": "傅里叶变换用于频域分析"})
+            course = store.create_course({"course_group": "电子类考研", "course_name": "信号与系统", "subject_key": "professional"})
+            artifact = store.capture_source({"source_name": "教材", "course_id": course["course_id"], "raw_text": "第1章 信号与系统\n\n傅里叶变换用于频域分析"})
             store.fts_available = False
             store.conn.execute("DROP TABLE SourcePassageFTS")
             store.conn.commit()
             assert store.enrich_source(artifact["source_artifact_id"])["parse_state"] == "ready"
+            heading = store.one("SELECT * FROM KnowledgeNode WHERE course_id=? AND name=?", (course["course_id"], "第1章 信号与系统"))
+            assert heading and heading["confirmation_state"] == "candidate" and heading["origin"] == "source_heading"
             rows = store.retrieve("频域分析")
             assert rows and rows[0]["source_artifact_id"] == artifact["source_artifact_id"]
             return {"status": "passed", "fts_available": store.fts_available}
