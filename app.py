@@ -3468,9 +3468,9 @@ class Store:
         result.sort(key=lambda item: (-item["count"], item.get("course_name") or "", item["kind"], item["label"]))
         return result
 
-    def export_wrong_questions(self, question_ids=None, include_answers=True):
+    def export_wrong_questions(self, question_ids=None, include_answers=True, filters=None):
         wanted = {value for value in as_list(question_ids) if isinstance(value, str)}
-        rows = self.list_wrong_questions()
+        rows = self.list_wrong_questions(filters)
         if wanted:
             rows = [row for row in rows if row["question_id"] in wanted]
         lines = ["# 错题本" if include_answers else "# 无答案自测", ""]
@@ -3685,7 +3685,9 @@ class Handler(BaseHTTPRequestHandler):
                 query = parse_qs(urlparse(self.path).query, keep_blank_values=True)
                 question_ids = query.get("question_id", [])
                 include_answers = query.get("answers", ["1"])[0] not in {"0", "false", "no"}
-                return self._text(200, self.store.export_wrong_questions(question_ids, include_answers), "text/markdown; charset=utf-8")
+                filter_keys = {"course_id", "subject_key", "chapter", "knowledge_point", "question_type"}
+                filters = {key: values[0] for key, values in query.items() if key in filter_keys and values and values[0]}
+                return self._text(200, self.store.export_wrong_questions(question_ids, include_answers, filters), "text/markdown; charset=utf-8")
             if path == "/api/north-star":
                 return self._json(200, {"data": self.store.north_star_events()})
             if path == "/api/intake":
