@@ -81,7 +81,8 @@ def run_similar_practice_intake_smoke():
         app.ROOT = root
         store = app.Store(root / "similar.sqlite", lambda: "2026-09-05T00:00:00Z")
         try:
-            base = store.create_intake_batch([], "math")
+            course = store.create_course({"course_group": "电子类考研", "course_name": "信号与系统", "subject_key": "professional"})
+            base = store.create_intake_batch([], course_id=course["course_id"])
             store.patch_intake(base["intake_id"], {"draft_fields": {
                 "analysis_status": "draft",
                 "question_text": "原题：求极限",
@@ -107,6 +108,7 @@ def run_similar_practice_intake_smoke():
             assert intake["status_key"] == "draft"
             assert intake["draft_fields"]["candidate_origin"] == "similar_practice"
             assert intake["field_sources"]["question_text"] == "模型候选"
+            assert intake["course_id"] == course["course_id"]
             assert store.one("SELECT COUNT(*) AS count FROM Question")["count"] == question_count
             assert len(store.list_wrong_questions()) == 1
 

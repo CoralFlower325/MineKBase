@@ -3253,7 +3253,7 @@ class Store:
         fields = self._extract_analysis(raw, grading.get("subject_key"))
         candidate = as_text(fields.get("question_text")).strip() or raw.strip()
         reference_answer = as_text(fields.get("reference_answer")).strip()
-        return {"status": "draft", "question_text": candidate, "reference_answer": reference_answer, "raw": raw, "provider": provider, "save_payload": {"source_question_id": question_id, "subject_key": grading.get("subject_key"), "question_text": candidate, "reference_answer": reference_answer, "raw": raw}}
+        return {"status": "draft", "question_text": candidate, "reference_answer": reference_answer, "raw": raw, "provider": provider, "save_payload": {"source_question_id": question_id, "subject_key": grading.get("subject_key"), "course_id": grading.get("course_id"), "question_text": candidate, "reference_answer": reference_answer, "raw": raw}}
 
     def get_session(self, session_id):
         row = self.one("SELECT * FROM ReviewSession WHERE review_session_id=?", (session_id,))
