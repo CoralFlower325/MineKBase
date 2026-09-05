@@ -148,6 +148,8 @@ def run_question_bank_smoke():
             node = store.create_knowledge_node({"course_id": course["course_id"], "name": "时序逻辑"})
             preview = store.preview_question_bank({"course_id": course["course_id"], "items": [{"question_text": "有效题"}, {"question_text": "", "reference_answer": "缺少题面"}]})
             assert preview["ready_count"] == 1 and preview["error_count"] == 1 and not preview["valid"]
+            duplicate_preview = store.preview_question_bank({"course_id": course["course_id"], "items": [{"question_bank_item_id": "duplicate-id", "question_text": "题一"}, {"question_bank_item_id": "duplicate-id", "question_text": "题二"}]})
+            assert not duplicate_preview["valid"] and duplicate_preview["rows"][1]["errors"][0]["code"] == "duplicate_question_bank_item_id"
             try:
                 store.import_question_bank({"course_id": course["course_id"], "items": [{"question_text": "", "reference_answer": "拒绝导入"}]})
                 raise AssertionError("invalid question bank row should be rejected")

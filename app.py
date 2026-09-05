@@ -462,6 +462,7 @@ class Store:
         if not isinstance(rows, list):
             rows = [payload] if payload.get("course_id") else []
         previews = []
+        seen_ids = set()
         for index, raw in enumerate(rows, 1):
             item = as_dict(raw)
             course_id = as_text(item.get("course_id") or payload.get("course_id")).strip()
@@ -473,13 +474,18 @@ class Store:
             image_path = as_text(item.get("image_path")).strip()
             if not question_text and not image_path:
                 errors.append({"field": "question_text", "code": "missing_question", "message": "题面文字和图片路径至少填写一项"})
+            item_id = as_text(item.get("question_bank_item_id")).strip()
+            if item_id:
+                if item_id in seen_ids:
+                    errors.append({"field": "question_bank_item_id", "code": "duplicate_question_bank_item_id", "message": "当前文件中重复的题库题目 ID"})
+                seen_ids.add(item_id)
             node_id = as_text(item.get("knowledge_node_id")).strip()
             if node_id:
                 node = self.one("SELECT course_id,confirmation_state FROM KnowledgeNode WHERE knowledge_node_id=?", (node_id,))
                 if not node or node["confirmation_state"] == "archived" or node["course_id"] != course_id:
                     errors.append({"field": "knowledge_node_id", "code": "invalid_knowledge_node", "message": "知识节点不存在或不属于所选课程"})
             normalized = {
-                "question_bank_item_id": as_text(item.get("question_bank_item_id")).strip() or None,
+                "question_bank_item_id": item_id or None,
                 "course_id": course_id,
                 "question_text": question_text,
                 "image_path": image_path or None,
