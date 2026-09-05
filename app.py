@@ -278,6 +278,52 @@ class Store:
             self.rollback()
             raise
 
+    def _ensure_knowledge_candidates(self, course_id, candidates):
+        """Materialize chapter/knowledge labels as reviewable candidate nodes."""
+        course_id = as_text(course_id).strip()
+        if not course_id:
+            return []
+        pairs = []
+        for candidate in candidates or []:
+            item = as_dict(candidate)
+            chapter = as_text(item.get("chapter")).strip()
+            point = as_text(item.get("knowledge_point")).strip()
+            if chapter or point:
+                pairs.append((chapter, point, as_text(item.get("origin"), "analysis_candidate")))
+        if not pairs:
+            return []
+        created = self.clock()
+        result = []
+        self.begin()
+        try:
+            for chapter, point, origin in pairs:
+                parent_id = None
+                if chapter:
+                    parent = self.one("SELECT * FROM KnowledgeNode WHERE course_id=? AND parent_id IS NULL AND name=? AND confirmation_state!='archived' ORDER BY created_at LIMIT 1", (course_id, chapter))
+                    if not parent:
+                        parent_id = uid("kn")
+                        self.conn.execute("INSERT INTO KnowledgeNode(knowledge_node_id,course_id,parent_id,name,aliases,origin,confirmation_state,created_at) VALUES(?,?,?,?,?,?,?,?)", (parent_id, course_id, None, chapter, dumps([]), origin, "candidate", created))
+                    else:
+                        parent_id = parent["knowledge_node_id"]
+                    result.append(dict(self.one("SELECT * FROM KnowledgeNode WHERE knowledge_node_id=?", (parent_id,))))
+                if point:
+                    query = "SELECT * FROM KnowledgeNode WHERE course_id=? AND name=? AND confirmation_state!='archived' AND parent_id " + ("IS NULL" if parent_id is None else "=?") + " ORDER BY created_at LIMIT 1"
+                    args = (course_id, point) if parent_id is None else (course_id, point, parent_id)
+                    node = self.one(query, args)
+                    if not node:
+                        node_id = uid("kn")
+                        self.conn.execute("INSERT INTO KnowledgeNode(knowledge_node_id,course_id,parent_id,name,aliases,origin,confirmation_state,created_at) VALUES(?,?,?,?,?,?,?,?)", (node_id, course_id, parent_id, point, dumps([]), origin, "candidate", created))
+                        node = self.one("SELECT * FROM KnowledgeNode WHERE knowledge_node_id=?", (node_id,))
+                    result.append(dict(node))
+            self.commit()
+            unique = {}
+            for node in result:
+                unique[node["knowledge_node_id"]] = node
+            return list(unique.values())
+        except Exception:
+            self.rollback()
+            raise
+
     def import_question_bank(self, payload):
         payload = as_dict(payload)
         rows = payload.get("items") if isinstance(payload.get("items"), list) else payload.get("rows")
@@ -1860,10 +1906,11 @@ class Store:
         has_question = any(c.get("kind")=="question" for c in candidates)
         has_source = any(c.get("kind")=="source" for c in candidates)
         answer_candidates = self._answer_candidates(draft, row["batch_id"], candidates)
+        knowledge_candidates = self._ensure_knowledge_candidates(row["course_id"], tag_candidates)
         manual_answer = as_text(as_dict(draft.get("field_sources")).get("reference_answer")).startswith(("用户修改", "用户选择"))
         current_origin = as_text(draft.get("answer_origin"))
         answer_origin = current_origin if manual_answer and current_origin else (answer_candidates[0]["origin"] if answer_candidates else "model")
-        draft.update({"retrieval_query": query, "resolution_kind":"matched" if has_question else "model", "resolution_label":"匹配题目" if has_question else "资料参考" if has_source else "待补充", "match_candidates":candidates, "source_refs":source_refs, "tag_candidates":tag_candidates, "answer_candidates":answer_candidates, "answer_conflict":len(answer_candidates) > 1, "answer_origin":answer_origin})
+        draft.update({"retrieval_query": query, "resolution_kind":"matched" if has_question else "model", "resolution_label":"匹配题目" if has_question else "资料参考" if has_source else "待补充", "match_candidates":candidates, "source_refs":source_refs, "tag_candidates":tag_candidates, "knowledge_node_candidates":knowledge_candidates, "answer_candidates":answer_candidates, "answer_conflict":len(answer_candidates) > 1, "answer_origin":answer_origin})
         self.begin()
         try:
             self.conn.execute("UPDATE IntakeItem SET draft_fields=?,updated_at=? WHERE intake_id=?", (dumps(draft), self.clock(), intake_id)); self.commit()
@@ -1894,11 +1941,13 @@ class Store:
             mapping = [{"objective_ref":"obj-1","learning_objective_id":objective_id,"role":"measured","question_unit_refs":["whole"],"origin_kind":"intake_confirm","captured_at":created}]
             selected_source_ids = draft.get("selected_source_passage_ids") if isinstance(draft.get("selected_source_passage_ids"), list) else []
             knowledge_node_id = as_text(draft.get("knowledge_node_id")).strip() or None
-            knowledge_node = self.one("SELECT knowledge_node_id,course_id,name FROM KnowledgeNode WHERE knowledge_node_id=? AND confirmation_state!='archived'", (knowledge_node_id,)) if knowledge_node_id else None
+            knowledge_node = self.one("SELECT knowledge_node_id,course_id,name,confirmation_state FROM KnowledgeNode WHERE knowledge_node_id=? AND confirmation_state!='archived'", (knowledge_node_id,)) if knowledge_node_id else None
             if knowledge_node_id and not knowledge_node:
                 raise DomainError("invalid_knowledge_node", "knowledge node not found", {"knowledge_node_id": knowledge_node_id})
             if knowledge_node and knowledge_node["course_id"] != row["course_id"]:
                 raise DomainError("invalid_knowledge_node", "knowledge node is not in the selected course", {"knowledge_node_id": knowledge_node_id})
+            if knowledge_node and knowledge_node["confirmation_state"] == "candidate":
+                self.conn.execute("UPDATE KnowledgeNode SET confirmation_state='confirmed',origin='user' WHERE knowledge_node_id=?", (knowledge_node_id,))
             grading = {"reference_answer":required["reference_answer"],"error_type":as_text(draft.get("error_type")),"error_reason":required["error_reason"],"error_breakpoint":required["error_breakpoint"],"correct_approach":as_text(draft.get("correct_approach")),"subject_key":subject,"course_id":row["course_id"],"knowledge_node_id":knowledge_node_id,"knowledge_point":knowledge_node["name"] if knowledge_node else draft.get("knowledge_point"),"chapter":draft.get("chapter"),"question_type":draft.get("question_type"),"intake_id":intake_id,"asset_refs":asset_refs,"selected_question_id":draft.get("selected_question_id"),"selected_source_passage_ids":selected_source_ids,"answer_origin":as_text(draft.get("answer_origin")) or "model","answer_candidates":as_list(draft.get("answer_candidates")),"question_image_status":"已保存题面" if question_assets else "待补题面"}
             presentation = {"schema_version":SNAPSHOT,"content":question_text,"blocks":[{"block_ref":"question","kind":"text","content":question_text,"leakage_state":"clean"}],"asset_refs":presentation_refs}
             self.conn.execute("INSERT INTO Question(question_id,course_pack_release_id,current_question_revision_id,lifecycle_state,created_at) VALUES(?,?,?,?,?)", (question_id,release_id,None,"active",created))

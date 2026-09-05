@@ -184,6 +184,42 @@ def run_question_bank_smoke():
             store.conn.close()
             app.ROOT = original_root
 
+
+def run_knowledge_candidate_smoke():
+    """Ensure analysis labels create candidates before the user confirms a node."""
+    original_root = app.ROOT
+    with tempfile.TemporaryDirectory(prefix="knowledge-candidate-") as directory:
+        root = Path(directory)
+        (root / "schema.sql").write_text((original_root / "schema.sql").read_text(), encoding="utf-8")
+        app.ROOT = root
+        store = app.Store(root / "knowledge.sqlite", lambda: "2026-09-05T00:00:00Z")
+        try:
+            course = store.create_course({"course_group": "计算机考研", "course_name": "408-数据结构", "subject_key": "professional"})
+            intake = store.create_intake_batch([], course_id=course["course_id"])
+            store.patch_intake(intake["intake_id"], {"draft_fields": {
+                "analysis_status": "draft",
+                "question_text": "判断树的遍历顺序",
+                "reference_answer": "按递归定义展开",
+                "chapter": "树与图",
+                "knowledge_point": "二叉树遍历",
+                "error_type": "method_selection",
+                "error_reason": "方法选择错误",
+                "error_breakpoint": "第一次选择遍历方法时",
+            }})
+            resolved = store.resolve_intake(intake["intake_id"])
+            nodes = resolved["draft_fields"]["knowledge_node_candidates"]
+            point = next(node for node in nodes if node["name"] == "二叉树遍历")
+            assert point["confirmation_state"] == "candidate" and point["course_id"] == course["course_id"]
+            store.patch_intake(intake["intake_id"], {"draft_fields": {"knowledge_node_id": point["knowledge_node_id"]}})
+            confirmed = store.confirm_intake(intake["intake_id"])
+            state = store.one("SELECT confirmation_state FROM KnowledgeNode WHERE knowledge_node_id=?", (point["knowledge_node_id"],))[0]
+            link = store.one("SELECT question_id FROM QuestionKnowledgeLink WHERE question_id=? AND knowledge_node_id=?", (confirmed["question_id"], point["knowledge_node_id"]))
+            assert state == "confirmed" and link
+            return {"status": "passed", "knowledge_node_id": point["knowledge_node_id"]}
+        finally:
+            store.conn.close()
+            app.ROOT = original_root
+
 def main():
     if len(sys.argv) > 1 and sys.argv[1] == "SIMILAR-PRACTICE-INTAKE":
         print(json.dumps({"runner": "run_p0_scenarios", "results": [{"scenario_id": "SIMILAR-PRACTICE-INTAKE", "status": run_similar_practice_intake_smoke()["status"]}]}, ensure_ascii=False, indent=2))
@@ -201,5 +237,6 @@ def main():
     results.append({'scenario_id':'FTS-FALLBACK-SMOKE','status':run_fts_fallback_smoke()['status']})
     results.append({'scenario_id':'SIMILAR-PRACTICE-INTAKE','status':run_similar_practice_intake_smoke()['status']})
     results.append({'scenario_id':'QUESTION-BANK-SMOKE','status':run_question_bank_smoke()['status']})
+    results.append({'scenario_id':'KNOWLEDGE-CANDIDATE-SMOKE','status':run_knowledge_candidate_smoke()['status']})
     print(json.dumps({'runner':'run_p0_scenarios','results':results},ensure_ascii=False,indent=2))
 if __name__=='__main__': main()
