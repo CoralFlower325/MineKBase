@@ -1323,7 +1323,7 @@ class Store:
                     extra["source_text"] = source_text
                 add("user_material", "用户资料候选（需确认）", answer, 2, **extra)
             elif kind == "question_bank":
-                add("question_bank", "已导入题库答案", as_dict(candidate.get("grading")).get("reference_answer"), 3, question_bank_item_id=candidate.get("question_bank_item_id"))
+                add("question_bank", "已导入题库答案", as_dict(candidate.get("grading")).get("reference_answer"), 3, question_bank_item_id=candidate.get("question_bank_item_id"), explanation=candidate.get("explanation"), bank_source=candidate.get("source"), bank_year=candidate.get("year"))
             elif kind == "question":
                 add("matched", "已确认题目答案", as_dict(candidate.get("grading")).get("reference_answer"), 3, question_id=candidate.get("question_id"))
 

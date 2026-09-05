@@ -213,6 +213,19 @@ def run_question_bank_smoke():
             assert len(strict_similar) == 1 and "已维护" in strict_similar[0]["question_text"]
             filtered = store.list_question_bank({"course_id": course["course_id"], "knowledge_node_id": node["knowledge_node_id"]})
             assert len(filtered) == 1 and "已维护" in filtered[0]["question_text"]
+            bank_match_intake = store.create_intake_batch([], course_id=course["course_id"])
+            store.patch_intake(bank_match_intake["intake_id"], {"draft_fields": {
+                "analysis_status": "draft",
+                "question_text": "同知识点相似题（已维护）",
+                "reference_answer": "模型暂定答案",
+                "error_reason": "题库候选证据测试",
+                "error_breakpoint": "选择答案时",
+                "chapter": "数字逻辑",
+                "knowledge_node_id": node["knowledge_node_id"],
+            }})
+            bank_match = store.resolve_intake(bank_match_intake["intake_id"])["draft_fields"]
+            bank_candidates = [item for item in bank_match["answer_candidates"] if item.get("origin") == "question_bank"]
+            assert bank_candidates and bank_candidates[0]["explanation"] == "看状态转移" and bank_candidates[0]["question_bank_item_id"] == filtered[0]["question_bank_item_id"]
             answer_intake = store.create_intake_batch([{"filename": "reference.png", "mime": "image/png", "data": b"reference", "role": "reference"}], course_id=course["course_id"])
             store.patch_intake(answer_intake["intake_id"], {"draft_fields": {
                 "analysis_status": "draft",
