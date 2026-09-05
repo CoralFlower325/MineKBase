@@ -225,8 +225,16 @@ def run_question_bank_smoke():
             practice = store.start_question_bank_item(filtered[0]["question_bank_item_id"])
             practice_draft = practice["draft_fields"]
             assert practice_draft["candidate_origin"] == "question_bank"
+            assert practice_draft["course_id"] == course["course_id"]
             assert practice_draft["knowledge_node_id"] == node["knowledge_node_id"]
+            assert practice_draft["knowledge_point"] == "时序逻辑"
+            assert practice_draft["answer_origin"] == "question_bank"
+            assert practice_draft["reference_answer"] == "A"
             assert store.one("SELECT COUNT(*) AS count FROM Question")["count"] == before_questions
+            practice_confirmed = store.confirm_intake(practice["intake_id"])
+            practice_grading = app.loads(store.one("SELECT grading_reference_fixture_snapshot FROM QuestionRevision WHERE question_id=?", (practice_confirmed["question_id"],))[0], {})
+            assert practice_grading["knowledge_point"] == "时序逻辑"
+            assert practice_grading["answer_origin"] == "question_bank"
             return {"status": "passed", "imported": imported["imported"], "similar": len(similar), "practice_intake_id": practice["intake_id"]}
         finally:
             store.conn.close()

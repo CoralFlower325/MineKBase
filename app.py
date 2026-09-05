@@ -690,6 +690,7 @@ class Store:
         course = self._course(item["course_id"])
         if not course:
             raise DomainError("invalid_course", "question bank item course not found", {"course_id": item["course_id"]})
+        knowledge_node = self.one("SELECT name FROM KnowledgeNode WHERE knowledge_node_id=? AND course_id=?", (item["knowledge_node_id"], item["course_id"]))
         intake = self.create_intake_batch([], course_id=item["course_id"])
         draft_fields = {
             "analysis_status": "draft",
@@ -711,7 +712,7 @@ class Store:
             "subject_key": course["subject_key"],
             "chapter": as_text(item["chapter"]),
             "knowledge_node_id": as_text(item["knowledge_node_id"]),
-            "knowledge_point": "",
+            "knowledge_point": knowledge_node["name"] if knowledge_node else "",
             "question_type": as_text(item["question_type"]),
             "difficulty": as_text(item["difficulty"]),
             "bank_explanation": as_text(item["explanation"]),
