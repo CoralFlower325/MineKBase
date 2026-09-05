@@ -237,6 +237,8 @@ def run_knowledge_candidate_smoke():
             nodes = resolved["draft_fields"]["knowledge_node_candidates"]
             answer_candidates = store._answer_candidates({}, intake["batch_id"], [{"kind": "source", "text": "教材说明\n参考答案：先列出递归关系，再按定义展开。\n补充：检查边界条件。", "source_passage_id": "passage-test", "source_name": "教材"}])
             assert answer_candidates[0]["answer"] == "先列出递归关系，再按定义展开。" and answer_candidates[0]["source_text"]
+            extracted = store._extract_analysis("首次出错步骤：第二步选择了错误的遍历方法\n错误类型：方法选择错误", "professional")
+            assert extracted["error_breakpoint"] == "第二步选择了错误的遍历方法" and extracted["error_type"] == "method_selection"
             long_candidates = store._answer_candidates({}, intake["batch_id"], [{"kind": "source", "text": "长资料" * 500, "source_passage_id": "passage-long", "source_name": "长资料"}])
             assert long_candidates[0]["source_excerpted"] and "资料较长" in long_candidates[0]["answer"] and long_candidates[0]["source_text"]
             point = next(node for node in nodes if node["name"] == "二叉树遍历")

@@ -2082,7 +2082,7 @@ class Store:
             "question_text": r"(?:题面|题目(?:要求)?|question(?:_text)?)",
             "reference_answer": r"(?:答案|标准答案|模型答案|参考答案|reference[_ ]?answer)",
             "subject_key": r"(?:科目|subject[_ ]?key)", "chapter": r"(?:章节|chapter)", "knowledge_point": r"(?:知识点|knowledge[_ ]?point)", "question_type": r"(?:题型|question[_ ]?type)",
-            "error_type": r"(?:错误类型|error[_ ]?type)", "error_reason": r"(?:做错原因|错误原因|error[_ ]?reason)", "error_breakpoint": r"(?:解题断点|首次偏离|error[_ ]?breakpoint)", "correct_approach": r"(?:正确思路|correct[_ ]?approach)"
+            "error_type": r"(?:错误类型|error[_ ]?type)", "error_reason": r"(?:做错原因|错误原因|error[_ ]?reason)", "error_breakpoint": r"(?:解题断点|首次偏离|首次出错步骤|error[_ ]?breakpoint)", "correct_approach": r"(?:正确思路|correct[_ ]?approach)"
         }
         # Models commonly use either "标题：内容" or a Markdown heading followed
         # by content on the next line. Parse line starts only, and keep raw_analysis
@@ -2141,7 +2141,7 @@ class Store:
         if not assets: raise DomainError("no_assets", "intake has no saved images", {"intake_id": intake_id})
         draft.update({"analysis_status": "analyzing", "analysis_error": ""})
         self.begin(); self.conn.execute("UPDATE IntakeItem SET draft_fields=?,updated_at=? WHERE intake_id=?", (dumps(draft), self.clock(), intake_id)); self.commit()
-        prompt_lines = ["你是错题分析助手。请阅读按顺序提供的图片，输出普通文本或 Markdown，并尽量使用以下标题：题面、标准答案、科目、章节、知识点、题型、错误类型、做错原因、解题断点、正确思路。", "区分题目要求、我的解题步骤、标准答案/模型答案；指出我具体在哪一步开始偏离。错误类型只能从三项中选择：知识点不会、方法选择错误、推导或计算出错；如果无法确定就留空并写待确认。", "不确定的内容标记为‘待确认’，不要猜测填满字段；分类字段可以为空。"]
+        prompt_lines = ["你是错题分析助手。请阅读按顺序提供的图片，输出普通文本或 Markdown，并尽量使用以下标题：题面、标准答案、科目、章节、知识点、题型、错误类型、做错原因、首次出错步骤、正确思路。", "区分题目要求、我的解题步骤、标准答案/模型答案；指出我具体在哪一步开始偏离。错误类型只能从三项中选择：知识点不会、方法选择错误、推导或计算出错；如果无法确定就留空并写待确认。", "不确定的内容标记为‘待确认’，不要猜测填满字段；分类字段可以为空。"]
         image_parts = []
         for asset in assets:
             path = ROOT / asset["path"]
@@ -2654,13 +2654,13 @@ class Store:
         return "\n".join([
             "你是回测比较助手。请比较初次解题过程和本次重新作答，不修改正式错题卡。",
             "区分题目要求、初次过程、本次过程、参考答案和已有错误诊断。指出本次是否修正了初次偏离，并说明依据。",
-            "如果诊断不确定，请标记为‘待确认’，不要伪装成确定结论。只输出普通文本或 Markdown，可使用标题：错误原因、解题断点、正确思路。",
+            "如果诊断不确定，请标记为‘待确认’，不要伪装成确定结论。只输出普通文本或 Markdown，可使用标题：错误原因、首次出错步骤、正确思路。",
             f"题面：{question_text or '（未提供）'}",
             f"初次过程：{initial_text or '（无文字过程，可能只有图片）'}",
             f"本次过程：{redo_text or '（无文字过程，可能只有图片）'}",
             f"参考答案：{reference_answer or '待补充'}",
             f"已有错误原因：{error_reason or '待补充'}",
-            f"已有解题断点：{error_breakpoint or '待补充'}",
+            f"已有首次出错步骤：{error_breakpoint or '待补充'}",
         ])
 
     def _run_attempt_comparison(self, attempt_id):
@@ -3419,7 +3419,7 @@ class Store:
             for asset in detail.get("assets", []):
                 lines.append(f"- 题面图片：![{asset.get('original_filename', 'image')}]({asset.get('media_url')})")
             if include_answers:
-                lines.extend(["", f"**参考答案**：{grading.get('reference_answer') or '待补充'}", f"**错误类型**：{ERROR_TYPES.get(grading.get('error_type'), '待确认')}", f"**错误原因**：{grading.get('error_reason') or '待补充'}", f"**解题断点**：{grading.get('error_breakpoint') or '待补充'}", f"**正确思路**：{grading.get('correct_approach') or '待补充'}"])
+                lines.extend(["", f"**参考答案**：{grading.get('reference_answer') or '待补充'}", f"**错误类型**：{ERROR_TYPES.get(grading.get('error_type'), '待确认')}", f"**错误原因**：{grading.get('error_reason') or '待补充'}", f"**首次出错步骤**：{grading.get('error_breakpoint') or '待补充'}", f"**正确思路**：{grading.get('correct_approach') or '待补充'}"])
             lines.append("\n---\n")
         return "\n".join(lines).rstrip() + "\n"
 
