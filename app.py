@@ -1424,13 +1424,29 @@ class Store:
         if not question_id:
             return
         question = self.one("SELECT current_question_revision_id FROM Question WHERE question_id=?", (question_id,))
-        revision = self.one("SELECT question_revision_id,grading_reference_fixture_snapshot FROM QuestionRevision WHERE question_revision_id=? AND question_id=?", (question["current_question_revision_id"], question_id)) if question and question["current_question_revision_id"] else None
+        revision = self.one("SELECT question_revision_id,question_units,grading_reference_fixture_snapshot FROM QuestionRevision WHERE question_revision_id=? AND question_id=?", (question["current_question_revision_id"], question_id)) if question and question["current_question_revision_id"] else None
         if not revision:
             return
         grading = as_dict(loads(revision["grading_reference_fixture_snapshot"], {}))
         for key in ("reference_answer", "answer_origin", "error_reason", "error_breakpoint", "correct_approach", "chapter", "knowledge_point", "question_type"):
             if key in draft:
                 grading[key] = as_text(draft.get(key))
+        if "question_text" in draft:
+            question_text = as_text(draft.get("question_text"))
+            units = loads(revision["question_units"], [])
+            if isinstance(units, list) and units and isinstance(units[0], dict):
+                units[0]["question_text"] = question_text
+                self.conn.execute("UPDATE QuestionRevision SET question_units=? WHERE question_revision_id=?", (dumps(units), revision["question_revision_id"]))
+            prompt = self.one("SELECT review_prompt_revision_id,presentation_snapshot FROM ReviewPromptRevision WHERE review_prompt_revision_id=(SELECT current_review_prompt_revision_id FROM QuestionRevision WHERE question_revision_id=?)", (revision["question_revision_id"],))
+            if prompt:
+                presentation = as_dict(loads(prompt["presentation_snapshot"], {}))
+                presentation["content"] = question_text
+                blocks = presentation.get("blocks")
+                if isinstance(blocks, list):
+                    for block in blocks:
+                        if isinstance(block, dict) and block.get("block_ref") == "question":
+                            block["content"] = question_text
+                self.conn.execute("UPDATE ReviewPromptRevision SET presentation_snapshot=? WHERE review_prompt_revision_id=?", (dumps(presentation), prompt["review_prompt_revision_id"]))
         if "subject_key" in draft:
             value = draft.get("subject_key")
             grading["subject_key"] = value if isinstance(value, str) and value in SUBJECT_KEYS else None
