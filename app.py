@@ -1272,17 +1272,25 @@ class Store:
             normalized = "\n".join(line.strip() for line in as_text(text).replace("\r\n", "\n").split("\n") if line.strip())
             if not normalized:
                 return "", False, ""
-            marker = re.search(r"(?im)^(?:参考答案|标准答案|答案|解答|解析|解题思路|解题过程)\s*[:：]\s*(.*)$", normalized)
             excerpt = normalized
-            if marker:
-                excerpt = normalized[marker.start(1):].strip()
-                next_section = re.search(r"\n\s*(?:题面|题目|知识点|章节|解析|参考答案|标准答案|补充|说明|注意)\s*[:：]", excerpt)
+            lines = normalized.split("\n")
+            marker_index = None
+            marker_inline = ""
+            for index, line in enumerate(lines):
+                marker = re.match(r"^\s*(?:#{1,6}\s*)?(?:【|\[)?(?:参考答案|标准答案|答案|解答|解析|解题思路|解题过程)(?:】|\])?\s*(?::|：)?\s*(.*)$", line, re.I)
+                if marker:
+                    marker_index = index
+                    marker_inline = marker.group(1).strip()
+                    break
+            if marker_index is not None:
+                excerpt = "\n".join(([marker_inline] if marker_inline else []) + lines[marker_index + 1:]).strip()
+                next_section = re.search(r"\n\s*(?:#{1,6}\s*)?(?:【|\[)?(?:题面|题目|知识点|章节|解析|参考答案|标准答案|补充|说明|注意)(?:】|\])?\s*(?::|：)?", excerpt, re.I)
                 if next_section:
                     excerpt = excerpt[:next_section.start()].strip()
             truncated = len(excerpt) > 1200
             if truncated:
                 excerpt = excerpt[:1200].rstrip() + "…（资料较长，请展开原文确认）"
-            return excerpt, bool(marker or truncated or excerpt != normalized), normalized
+            return excerpt, bool(marker_index is not None or truncated or excerpt != normalized), normalized
 
         reference_assets = self.all("SELECT asset_id,role FROM ImageAsset WHERE batch_id=? AND state='saved'", (batch_id,))
         if any(row["role"] == "reference" for row in reference_assets):
