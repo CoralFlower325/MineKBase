@@ -8,7 +8,7 @@
 
 当前产品主线是数学一、408 和可自定义的电子类专业课。首次启动会提供数学一、408、信号与系统三个默认课程，也可以通过 `GET/POST /api/courses` 创建自定义专业课。课程选择会随题目和资料保存，旧 `subject_key` 仍作为兼容字段保留。
 
-个人知识节点可以通过 `GET/POST /api/knowledge-nodes` 按课程创建和查看；已确认题目可绑定同课程节点。题库第一版支持 JSON API 或 multipart CSV/JSON 导入：`POST /api/question-bank/import`，相似题查询为 `GET /api/wrong-questions/:id/similar`，按课程、知识节点、章节、题型和难度做轻量筛选；当前仍缺导入预览、错误行回报和独立练习会话。
+个人知识节点可以通过 `GET/POST /api/knowledge-nodes` 按课程创建和查看；已确认题目可绑定同课程节点。题库第一版支持 JSON API 或 multipart CSV/JSON 导入：`POST /api/question-bank/import`，相似题查询为 `GET /api/wrong-questions/:id/similar`，按课程、知识节点、章节、题型和难度做轻量筛选；相似题可以通过 `POST /api/question-bank/:id/start` 转成待确认练习草稿，只有确认后才进入正式错题本。当前仍缺导入预览、错误行回报和独立练习结果统计。
 
 - 用 SQLite 保存课程、学习目标、题目版本、回测任务、会话、Attempt、Assessment 和 EvidenceEvent。
 - 通过本地 Web API 或首页完成：建立/查看任务、开始回测、保存/继续编辑草稿、查看提示、提交作答、补充评价。
@@ -129,7 +129,7 @@ python3 run_p0_scenarios.py
 4. 资料解析已完成最小闭环：文字 PDF 使用现有 `pypdf` 按页提取；扫描 PDF 的空文字页和直接上传的资料图片使用可选、懒加载的 PaddleOCR（PDF 光栅化需要 `pypdfium2` 或 `fitz`；依赖缺失时保留原文件并返回 `unavailable`）；DOCX 使用懒加载 `python-docx` 提取段落和表格单元格。所有结果写入同一套 `SourcePassage`、FTS 和 page/locator；OCR 只用于资料检索，复杂版面仍不宣称完全覆盖。浏览器会在保存后逐份自动增强，并提供最近资料列表。
 5. Context Composer + LLM 薄切片已完成：先使用已关联 passage，再合并现有 FTS 命中，返回服务端实际出处；未定位或 LLM 不可用都不阻断保存。
 6. 只有真实需要跨章节、多跳关系时才接入一个 [LightRAG](https://github.com/HKUDS/LightRAG) REST sidecar；不同时运行两套图/向量索引。若需要更强布局解析，再单独评估 [Docling](https://github.com/docling-project/docling)。
-7. 数学一与可配置专业课的图片错题按确认时间依次安排 +3/+7/+10/+14 天，第 14 天后停止自动排程；回测分流和真实题库相似题筛选的第一版已按 `design.md` 的 P3/P4 落地，后续补导入质量反馈和独立练习会话。政治选择题库后置，英语暂不开发；旧文字演示链仅用于迁移，FSRS 后置。
+7. 数学一与可配置专业课的图片错题按确认时间依次安排 +3/+7/+10/+14 天，第 14 天后停止自动排程；回测分流和真实题库相似题筛选、转待确认练习草稿的第一版已按 `design.md` 的 P3/P4 落地，后续补导入质量反馈和独立练习结果统计。政治选择题库后置，英语暂不开发；旧文字演示链仅用于迁移，FSRS 后置。
 
 原则只有一句：用户输入先落库，增强过程后补；状态和提示帮助用户判断，不把不完整变成阻碍。
 

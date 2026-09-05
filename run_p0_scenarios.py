@@ -156,7 +156,13 @@ def run_question_bank_smoke():
             assert similar[0]["match_score"] > similar[1]["match_score"]
             filtered = store.list_question_bank({"course_id": course["course_id"], "knowledge_node_id": node["knowledge_node_id"]})
             assert len(filtered) == 1 and filtered[0]["question_text"] == "同知识点相似题"
-            return {"status": "passed", "imported": imported["imported"], "similar": len(similar)}
+            before_questions = store.one("SELECT COUNT(*) AS count FROM Question")["count"]
+            practice = store.start_question_bank_item(filtered[0]["question_bank_item_id"])
+            practice_draft = practice["draft_fields"]
+            assert practice_draft["candidate_origin"] == "question_bank"
+            assert practice_draft["knowledge_node_id"] == node["knowledge_node_id"]
+            assert store.one("SELECT COUNT(*) AS count FROM Question")["count"] == before_questions
+            return {"status": "passed", "imported": imported["imported"], "similar": len(similar), "practice_intake_id": practice["intake_id"]}
         finally:
             store.conn.close()
             app.ROOT = original_root

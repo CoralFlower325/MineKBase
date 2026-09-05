@@ -334,6 +334,56 @@ class Store:
         scored.sort(key=lambda row: (-row["match_score"], row.get("created_at") or "", row["question_bank_item_id"]))
         return scored[:max(1, min(int(limit), 50))]
 
+    def start_question_bank_item(self, question_bank_item_id):
+        """Turn an imported bank row into an editable practice intake.
+
+        This deliberately stops before Question/Attempt creation. The user
+        must review the imported answer and confirm the intake before it can
+        become a formal wrong question.
+        """
+        item = self.one("SELECT * FROM QuestionBankItem WHERE question_bank_item_id=?", (question_bank_item_id,))
+        if not item:
+            raise DomainError("not_found", "question bank item not found", {"question_bank_item_id": question_bank_item_id})
+        course = self._course(item["course_id"])
+        if not course:
+            raise DomainError("invalid_course", "question bank item course not found", {"course_id": item["course_id"]})
+        intake = self.create_intake_batch([], course_id=item["course_id"])
+        draft_fields = {
+            "analysis_status": "draft",
+            "resolution_kind": "question_bank",
+            "resolution_label": "题库练习候选",
+            "question_text": as_text(item["question_text"]),
+            "reference_answer": as_text(item["reference_answer"]),
+            "answer_origin": "question_bank",
+            "field_sources": {
+                "question_text": "题库导入",
+                "reference_answer": "题库导入",
+                "chapter": "题库导入",
+                "knowledge_point": "题库导入",
+                "question_type": "题库导入",
+            },
+            "candidate_origin": "question_bank",
+            "source_question_bank_item_id": item["question_bank_item_id"],
+            "course_id": item["course_id"],
+            "subject_key": course["subject_key"],
+            "chapter": as_text(item["chapter"]),
+            "knowledge_node_id": as_text(item["knowledge_node_id"]),
+            "knowledge_point": "",
+            "question_type": as_text(item["question_type"]),
+            "difficulty": as_text(item["difficulty"]),
+            "bank_explanation": as_text(item["explanation"]),
+            "bank_source": as_text(item["source"]),
+            "bank_year": as_text(item["year"]),
+        }
+        self.begin()
+        try:
+            self.conn.execute("UPDATE IntakeItem SET draft_fields=?,updated_at=? WHERE intake_id=?", (dumps(draft_fields), self.clock(), intake["intake_id"]))
+            self.commit()
+        except Exception:
+            self.rollback()
+            raise
+        return self._intake_detail(intake["intake_id"])
+
     def _demo_manifest(self) -> dict:
         path = ROOT / "fixtures" / "p0_fixture_manifest.json"
         try:
@@ -3132,6 +3182,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, {"data": self.store.create_knowledge_node(payload)})
             if path == "/api/question-bank/import":
                 return self._json(200, {"data": self.store.import_question_bank(payload)})
+            if path.startswith("/api/question-bank/") and path.endswith("/start"):
+                item_id = path[len("/api/question-bank/"):-len("/start")].strip("/")
+                return self._json(200, {"data": self.store.start_question_bank_item(item_id)})
             if path.startswith("/api/wrong-questions/") and path.endswith("/similar"):
                 question_id = path[len("/api/wrong-questions/"):-len("/similar")].strip("/")
                 return self._json(200, {"data": self.store.similar_question_bank(question_id)})
