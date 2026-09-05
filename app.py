@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import cgi
+import csv
 import datetime as dt
 import io
 import json
@@ -32,6 +33,7 @@ VISIBILITY = "visibility-v1"
 IMAGE_ROLES = {"question", "my_process", "reference", "redo_process", "mixed"}
 SUBJECT_KEYS = {"math", "english", "politics", "professional"}
 REVIEW_OFFSETS = (3, 7, 10, 14)
+SCHEMA_VERSION = 3
 
 TASK_PRIORITY = [
     "awaiting_assessment",
@@ -116,31 +118,71 @@ class Store:
     def __init__(self, path=DB_PATH, clock=None):
         self.path = Path(path)
         self.clock = clock or now_utc
+        self.fts_available = False
         self.conn = sqlite3.connect(self.path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys=ON")
         # schema.sql is the only structural source. Re-running its CREATE IF
         # NOT EXISTS statements avoids a second startup contract.
         self.conn.executescript((ROOT / "schema.sql").read_text())
-        columns = {row[1] for row in self.conn.execute("PRAGMA table_info(SourceArtifact)")}
-        if "subject_key" not in columns:
-            self.conn.execute("ALTER TABLE SourceArtifact ADD COLUMN subject_key TEXT")
-            self.conn.commit()
+        self._ensure_schema_version()
+        self._ensure_default_courses()
         self._ensure_source_fts()
         self.lock = threading.RLock()
 
+    def _ensure_schema_version(self):
+        current = int(self.conn.execute("PRAGMA user_version").fetchone()[0])
+        if current >= SCHEMA_VERSION:
+            return
+        if current < 1:
+            columns = {row[1] for row in self.conn.execute("PRAGMA table_info(SourceArtifact)")}
+            if "subject_key" not in columns:
+                self.conn.execute("ALTER TABLE SourceArtifact ADD COLUMN subject_key TEXT")
+        if current < 2:
+            source_columns = {row[1] for row in self.conn.execute("PRAGMA table_info(SourceArtifact)")}
+            if "course_id" not in source_columns:
+                self.conn.execute("ALTER TABLE SourceArtifact ADD COLUMN course_id TEXT REFERENCES Course(course_id)")
+            batch_columns = {row[1] for row in self.conn.execute("PRAGMA table_info(CaptureBatch)")}
+            if "course_id" not in batch_columns:
+                self.conn.execute("ALTER TABLE CaptureBatch ADD COLUMN course_id TEXT REFERENCES Course(course_id)")
+        self.conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+        self.conn.commit()
+
+    def _ensure_default_courses(self):
+        """Create the small first-run course set without constraining custom courses."""
+        defaults = (
+            ("course-math-1", "考研", "数学一", "math"),
+            ("course-408", "计算机考研", "408", "professional"),
+            ("course-signals", "电子类考研", "信号与系统", "professional"),
+        )
+        now = self.clock()
+        self.conn.executemany(
+            "INSERT OR IGNORE INTO Course(course_id,course_group,course_name,subject_key,created_at,active) VALUES(?,?,?,?,?,1)",
+            [(*row, now) for row in defaults],
+        )
+        self.conn.commit()
+
     def _ensure_source_fts(self):
-        self.conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS SourcePassageFTS USING fts5(source_passage_id UNINDEXED, source_artifact_id UNINDEXED, text, tokenize='trigram')")
-        # Backfill rows created by an older app version without introducing a
-        # migration framework.  IDs remain those of SourcePassage.
-        passage_count = self.conn.execute("SELECT COUNT(*) FROM SourcePassage").fetchone()[0]
-        fts_count = self.conn.execute("SELECT COUNT(*) FROM SourcePassageFTS").fetchone()[0]
-        if passage_count != fts_count:
-            self.conn.execute("DELETE FROM SourcePassageFTS")
-            self.conn.execute("INSERT INTO SourcePassageFTS(source_passage_id,source_artifact_id,text) SELECT source_passage_id,source_artifact_id,COALESCE(text,'') FROM SourcePassage ORDER BY source_artifact_id,ordinal")
-            # The backfill is part of startup repair.  Commit it before any
-            # normal write transaction so BEGIN IMMEDIATE can start cleanly.
-            self.conn.commit()
+        try:
+            self.conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS SourcePassageFTS USING fts5(source_passage_id UNINDEXED, source_artifact_id UNINDEXED, text, tokenize='trigram')")
+            # Backfill rows created by an older app version and repair stale
+            # text, not only a differing row count. IDs remain those of
+            # SourcePassage.
+            mismatch = self.conn.execute(
+                "SELECT EXISTS(SELECT source_passage_id,source_artifact_id,COALESCE(text,'') FROM SourcePassage EXCEPT SELECT source_passage_id,source_artifact_id,COALESCE(text,'') FROM SourcePassageFTS) OR EXISTS(SELECT source_passage_id,source_artifact_id,COALESCE(text,'') FROM SourcePassageFTS EXCEPT SELECT source_passage_id,source_artifact_id,COALESCE(text,'') FROM SourcePassage)"
+            ).fetchone()[0]
+            if mismatch:
+                self.conn.execute("DELETE FROM SourcePassageFTS")
+                self.conn.execute("INSERT INTO SourcePassageFTS(source_passage_id,source_artifact_id,text) SELECT source_passage_id,source_artifact_id,COALESCE(text,'') FROM SourcePassage ORDER BY source_artifact_id,ordinal")
+                # Backfill before any normal write transaction so BEGIN
+                # IMMEDIATE can start cleanly.
+                self.conn.commit()
+            self.fts_available = True
+        except sqlite3.OperationalError:
+            # FTS5/trigram is an optional acceleration. SourceArtifact and
+            # SourcePassage remain usable through the LIKE path.
+            self.conn.rollback()
+            self.fts_available = False
 
     def one(self, query, args=()):
         with self.lock:
@@ -163,6 +205,134 @@ class Store:
         self.lock.release()
 
     # ---------- seed and normalization ----------
+
+    def list_courses(self, include_inactive=False):
+        clause = "" if include_inactive else " WHERE active=1"
+        return [dict(row) for row in self.all(f"SELECT * FROM Course{clause} ORDER BY course_group,course_name,course_id")]
+
+    def create_course(self, payload):
+        payload = as_dict(payload)
+        name = as_text(payload.get("course_name")).strip()
+        group = as_text(payload.get("course_group"), "自定义").strip() or "自定义"
+        subject = payload.get("subject_key") if payload.get("subject_key") in SUBJECT_KEYS else "professional"
+        if not name:
+            raise DomainError("invalid_course", "course_name is required")
+        duplicate = self.one("SELECT course_id FROM Course WHERE course_name=? AND active=1", (name,))
+        if duplicate:
+            return dict(self.one("SELECT * FROM Course WHERE course_id=?", (duplicate["course_id"],)))
+        course_id = uid("course")
+        created = self.clock()
+        self.begin()
+        try:
+            self.conn.execute("INSERT INTO Course(course_id,course_group,course_name,subject_key,created_at,active) VALUES(?,?,?,?,?,1)", (course_id, group, name, subject, created))
+            row = self.one("SELECT * FROM Course WHERE course_id=?", (course_id,))
+            self.commit()
+            return dict(row)
+        except Exception:
+            self.rollback()
+            raise
+
+    def _course(self, course_id):
+        if not course_id:
+            return None
+        return self.one("SELECT * FROM Course WHERE course_id=? AND active=1", (course_id,))
+
+    def list_knowledge_nodes(self, course_id=None, include_candidates=True):
+        clauses, args = [], []
+        if course_id:
+            clauses.append("course_id=?")
+            args.append(course_id)
+        if not include_candidates:
+            clauses.append("confirmation_state='confirmed'")
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        return [dict(row) for row in self.all(f"SELECT * FROM KnowledgeNode{where} ORDER BY course_id,parent_id,name", args)]
+
+    def create_knowledge_node(self, payload):
+        payload = as_dict(payload)
+        course_id = as_text(payload.get("course_id")).strip()
+        name = as_text(payload.get("name")).strip()
+        if not self._course(course_id):
+            raise DomainError("invalid_course", "course_id is required")
+        if not name:
+            raise DomainError("invalid_knowledge_node", "name is required")
+        parent_id = as_text(payload.get("parent_id")).strip() or None
+        if parent_id:
+            parent = self.one("SELECT knowledge_node_id FROM KnowledgeNode WHERE knowledge_node_id=? AND course_id=?", (parent_id, course_id))
+            if not parent:
+                raise DomainError("invalid_parent", "parent_id is not in the same course")
+        node_id = uid("kn")
+        created = self.clock()
+        state = "confirmed" if payload.get("confirmation_state") == "confirmed" else "candidate"
+        self.begin()
+        try:
+            self.conn.execute("INSERT INTO KnowledgeNode(knowledge_node_id,course_id,parent_id,name,aliases,origin,confirmation_state,created_at) VALUES(?,?,?,?,?,?,?,?)", (node_id, course_id, parent_id, name, dumps(as_list(payload.get("aliases"))), as_text(payload.get("origin"), "user"), state, created))
+            row = self.one("SELECT * FROM KnowledgeNode WHERE knowledge_node_id=?", (node_id,))
+            self.commit()
+            return dict(row)
+        except Exception:
+            self.rollback()
+            raise
+
+    def import_question_bank(self, payload):
+        payload = as_dict(payload)
+        rows = payload.get("items") if isinstance(payload.get("items"), list) else payload.get("rows")
+        if not isinstance(rows, list):
+            rows = [payload] if payload.get("course_id") else []
+        imported = []
+        self.begin()
+        try:
+            for raw in rows:
+                item = as_dict(raw)
+                course_id = as_text(item.get("course_id") or payload.get("course_id")).strip()
+                if not self._course(course_id):
+                    raise DomainError("invalid_course", "each question bank item needs a valid course_id", {"course_id": course_id})
+                node_id = as_text(item.get("knowledge_node_id")).strip() or None
+                if node_id:
+                    node = self.one("SELECT course_id FROM KnowledgeNode WHERE knowledge_node_id=? AND confirmation_state!='archived'", (node_id,))
+                    if not node or node["course_id"] != course_id:
+                        raise DomainError("invalid_knowledge_node", "question bank knowledge node must belong to its course", {"knowledge_node_id": node_id})
+                item_id = as_text(item.get("question_bank_item_id")).strip() or uid("bank")
+                self.conn.execute("INSERT OR REPLACE INTO QuestionBankItem(question_bank_item_id,course_id,question_text,image_path,chapter,knowledge_node_id,question_type,difficulty,reference_answer,explanation,source,year,raw_payload,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (item_id, course_id, as_text(item.get("question_text")), as_text(item.get("image_path")) or None, as_text(item.get("chapter")) or None, node_id, as_text(item.get("question_type")) or None, as_text(item.get("difficulty")) or None, as_text(item.get("reference_answer")), as_text(item.get("explanation")), as_text(item.get("source")), as_text(item.get("year")), dumps(item), self.clock()))
+                imported.append(item_id)
+            self.commit()
+            return {"imported": len(imported), "question_bank_item_ids": imported}
+        except Exception:
+            self.rollback()
+            raise
+
+    def list_question_bank(self, filters=None):
+        filters = as_dict(filters)
+        clauses, args = [], []
+        for key in ("course_id", "knowledge_node_id", "chapter", "question_type", "difficulty"):
+            value = as_text(filters.get(key)).strip()
+            if value:
+                clauses.append(f"{key}=?")
+                args.append(value)
+        query = "SELECT * FROM QuestionBankItem" + (" WHERE " + " AND ".join(clauses) if clauses else "") + " ORDER BY created_at DESC,question_bank_item_id LIMIT ?"
+        args.append(max(1, min(int(filters.get("limit", 100)), 500)))
+        return [dict(row) for row in self.all(query, args)]
+
+    def similar_question_bank(self, question_id, limit=12):
+        item = self._wrong_dto(question_id)
+        if not item:
+            raise DomainError("not_found", "wrong question not found", {"question_id": question_id})
+        grading = as_dict(item.get("grading"))
+        values = {key: as_text(grading.get(key)).strip() for key in ("course_id", "chapter", "question_type", "difficulty")}
+        node_id = as_text(grading.get("knowledge_node_id")).strip()
+        candidates = self.list_question_bank({"course_id": values["course_id"], "limit": limit * 4}) if values["course_id"] else []
+        scored = []
+        for candidate in candidates:
+            if candidate["question_bank_item_id"] == question_id:
+                continue
+            score = 0
+            if node_id and candidate.get("knowledge_node_id") == node_id: score += 8
+            if values["chapter"] and candidate.get("chapter") == values["chapter"]: score += 4
+            if values["question_type"] and candidate.get("question_type") == values["question_type"]: score += 3
+            if values.get("difficulty") and candidate.get("difficulty") == values["difficulty"]: score += 2
+            candidate["match_score"] = score
+            scored.append(candidate)
+        scored.sort(key=lambda row: (-row["match_score"], row.get("created_at") or "", row["question_bank_item_id"]))
+        return scored[:max(1, min(int(limit), 50))]
 
     def _demo_manifest(self) -> dict:
         path = ROOT / "fixtures" / "p0_fixture_manifest.json"
@@ -335,6 +505,12 @@ class Store:
         files = files or []
         created = self.clock()
         subject = payload.get("subject_key") if payload.get("subject_key") in SUBJECT_KEYS else None
+        course_id = as_text(payload.get("course_id")).strip() or None
+        course = self._course(course_id)
+        if course_id and not course:
+            raise DomainError("invalid_course", "course_id not found", {"course_id": course_id})
+        if not subject and course:
+            subject = course["subject_key"]
         source_name = payload.get("source_name") if isinstance(payload.get("source_name"), str) else ""
         records = []
         for file in files:
@@ -353,11 +529,11 @@ class Store:
                 # visible and can be retried without rolling back other files.
                 stored_path = None
                 payload = {**payload, "save_error": str(error)}
-            records.append((artifact_id, kind, filename, stored_path, None, {**payload, "filename": filename, "mime": mime}, subject))
+            records.append((artifact_id, kind, filename, stored_path, None, {**payload, "filename": filename, "mime": mime}, subject, course_id))
         if not records:
             source_url = payload.get("source_url") if isinstance(payload.get("source_url"), str) else ""
             if source_url.strip():
-                records.append((uid("source"), "webpage", source_name or source_url.strip(), None, None, {**payload, "source_url": source_url.strip()}, subject))
+                records.append((uid("source"), "webpage", source_name or source_url.strip(), None, None, {**payload, "source_url": source_url.strip()}, subject, course_id))
         if not records:
             raw_text = payload.get("raw_text")
             if not isinstance(raw_text, str):
@@ -372,13 +548,13 @@ class Store:
                         stored_path = payload[key]
                         break
             kind = payload.get("kind") if isinstance(payload.get("kind"), str) and payload.get("kind") else "image" if payload.get("image_path") else "text" if isinstance(raw_text, str) else "file"
-            records.append((uid("source"), kind, source_name or (payload.get("name") if isinstance(payload.get("name"), str) else ""), stored_path if isinstance(stored_path, str) else None, raw_text if isinstance(raw_text, str) else None, payload, subject))
+            records.append((uid("source"), kind, source_name or (payload.get("name") if isinstance(payload.get("name"), str) else ""), stored_path if isinstance(stored_path, str) else None, raw_text if isinstance(raw_text, str) else None, payload, subject, course_id))
         self.begin()
         try:
-            for artifact_id, kind, name, stored_path, raw_text, raw_payload, subject_key in records:
+            for artifact_id, kind, name, stored_path, raw_text, raw_payload, subject_key, record_course_id in records:
                 self.conn.execute(
-                    "INSERT INTO SourceArtifact(source_artifact_id,kind,source_name,stored_path,raw_text,raw_payload,subject_key,parse_state,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
-                    (artifact_id, kind, name, stored_path, raw_text, dumps(raw_payload), subject_key, "pending", created),
+                    "INSERT INTO SourceArtifact(source_artifact_id,kind,source_name,stored_path,raw_text,raw_payload,subject_key,course_id,parse_state,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    (artifact_id, kind, name, stored_path, raw_text, dumps(raw_payload), subject_key, record_course_id, "pending", created),
                 )
             self.commit()
             result = {"source_artifact_id": records[0][0], "parse_state": "pending"}
@@ -502,7 +678,7 @@ class Store:
             self.conn.execute("UPDATE ReviewPromptRevision SET presentation_snapshot=? WHERE review_prompt_revision_id=?", (dumps(presentation), revision["current_review_prompt_revision_id"]))
 
     def _intake_detail(self, intake_id):
-        row = self.one("SELECT i.*, b.subject_key FROM IntakeItem i JOIN CaptureBatch b ON b.batch_id=i.batch_id WHERE i.intake_id=?", (intake_id,))
+        row = self.one("SELECT i.*, b.subject_key, b.course_id, c.course_name, c.course_group FROM IntakeItem i JOIN CaptureBatch b ON b.batch_id=i.batch_id LEFT JOIN Course c ON c.course_id=b.course_id WHERE i.intake_id=?", (intake_id,))
         if not row:
             raise DomainError("not_found", "intake not found", {"intake_id": intake_id})
         draft = loads(row["draft_fields"], {})
@@ -515,9 +691,11 @@ class Store:
         result["draft_fields"] = loads(result.get("draft_fields"), {})
         result["assets"] = assets
         result["batch_id"] = row["batch_id"]
+        result.update(self._intake_status(row, result["draft_fields"], len(assets)))
+        result["field_sources"] = self._draft_field_sources(result["draft_fields"])
         return result
 
-    def _save_uploads(self, intake_id, files, subject_key=None, allow_redo=False):
+    def _save_uploads(self, intake_id, files, subject_key=None, course_id=None, allow_redo=False):
         files = files or []
         created = self.clock()
         batch_id = None
@@ -529,8 +707,13 @@ class Store:
         else:
             if subject_key not in SUBJECT_KEYS and subject_key not in (None, ""):
                 raise DomainError("invalid_subject", "subject_key must be math, english, politics, professional, or empty")
+            if course_id and not self._course(course_id):
+                raise DomainError("invalid_course", "course_id not found", {"course_id": course_id})
+            if not subject_key and course_id:
+                course = self._course(course_id)
+                subject_key = course["subject_key"] if course else None
             batch_id, intake_id = uid("batch"), uid("intake")
-            self.conn.execute("INSERT INTO CaptureBatch(batch_id,subject_key,created_at) VALUES(?,?,?)", (batch_id, subject_key or None, created))
+            self.conn.execute("INSERT INTO CaptureBatch(batch_id,subject_key,course_id,created_at) VALUES(?,?,?,?)", (batch_id, subject_key or None, course_id or None, created))
             self.conn.execute("INSERT INTO IntakeItem(intake_id,batch_id,state,draft_fields,failure_note,created_at,updated_at) VALUES(?,?,?,?,?,?,?)", (intake_id, batch_id, "raw", "{}", None, created, created))
         existing_count = self.one("SELECT COALESCE(MAX(ordinal),0) FROM ImageAsset WHERE batch_id=?", (batch_id,))[0]
         failures = []
@@ -566,13 +749,46 @@ class Store:
         self.commit()
         return self._intake_detail(intake_id)
 
-    def create_intake_batch(self, files, subject_key=None):
+    def create_intake_batch(self, files, subject_key=None, course_id=None):
         self.begin()
         try:
-            return self._save_uploads(None, files, subject_key)
+            return self._save_uploads(None, files, subject_key, course_id)
         except Exception:
             self.rollback()
             raise
+
+    def create_intake_candidate(self, payload):
+        """Save a generated practice question as an editable intake draft."""
+        payload = as_dict(payload)
+        question_text = as_text(payload.get("question_text")).strip()
+        if not question_text:
+            raise DomainError("invalid_candidate", "question_text is required")
+        subject_key = payload.get("subject_key") if payload.get("subject_key") in SUBJECT_KEYS else None
+        intake = self.create_intake_batch([], subject_key, as_text(payload.get("course_id")).strip() or None)
+        draft_fields = {
+            "analysis_status": "draft",
+            "resolution_kind": "model",
+            "resolution_label": "相似练习候选",
+            "question_text": question_text,
+            "reference_answer": as_text(payload.get("reference_answer")).strip(),
+            "answer_origin": "model",
+            "field_sources": {
+                "question_text": "模型候选",
+                "reference_answer": "模型候选",
+            },
+            "candidate_origin": "similar_practice",
+            "source_question_id": as_text(payload.get("source_question_id")).strip() or None,
+            "course_id": as_text(payload.get("course_id")).strip() or None,
+            "raw_analysis": as_text(payload.get("raw")),
+        }
+        self.begin()
+        try:
+            self.conn.execute("UPDATE IntakeItem SET draft_fields=?,updated_at=? WHERE intake_id=?", (dumps(draft_fields), self.clock(), intake["intake_id"]))
+            self.commit()
+        except Exception:
+            self.rollback()
+            raise
+        return self._intake_detail(intake["intake_id"])
 
     def append_intake_assets(self, intake_id, files, allow_redo=False):
         self.begin()
@@ -582,9 +798,66 @@ class Store:
             self.rollback()
             raise
 
+    def _intake_status(self, row, draft, asset_count=None):
+        analysis_status = as_text(draft.get("analysis_status"))
+        if draft.get("confirmed_question_id"):
+            status_key, status_label = "confirmed", "已确认"
+        elif row["state"] == "incomplete" and not draft.get("candidate_origin"):
+            status_key, status_label = "incomplete", "部分图片保存失败"
+        elif analysis_status == "analyzing":
+            status_key, status_label = "analyzing", "分析中"
+        elif analysis_status == "failed":
+            status_key, status_label = "failed", "需要重试"
+        elif analysis_status == "draft":
+            status_key, status_label = "draft", "草稿已生成"
+        else:
+            status_key, status_label = "saved", "已保存，待处理"
+        fields = [
+            key for key in (
+                "question_text", "reference_answer", "subject_key", "chapter",
+                "knowledge_point", "question_type", "error_reason",
+                "error_breakpoint", "correct_approach",
+            ) if draft.get(key) not in (None, "")
+        ]
+        return {
+            "status_key": status_key,
+            "status_label": status_label,
+            "failure_reason": as_text(draft.get("analysis_error")) or as_text(row["failure_note"]),
+            "recognized_fields": fields,
+            "can_retry": status_key in {"saved", "failed", "incomplete"},
+            "can_edit": status_key != "confirmed",
+            "can_confirm": status_key in {"draft", "saved", "failed", "incomplete"},
+            **({"asset_count": asset_count} if asset_count is not None else {}),
+        }
+
+    def _draft_field_sources(self, draft):
+        draft = as_dict(draft)
+        sources = dict(draft.get("field_sources")) if isinstance(draft.get("field_sources"), dict) else {}
+        answer_origin = {
+            "matched": "匹配题目",
+            "reference_image": "参考答案图/模型",
+            "model": "模型候选",
+        }.get(as_text(draft.get("answer_origin")), "模型候选")
+        for key in (
+            "question_text", "reference_answer", "subject_key", "chapter",
+            "knowledge_point", "question_type", "error_reason",
+            "error_breakpoint", "correct_approach",
+        ):
+            if draft.get(key) in (None, "") or sources.get(key):
+                continue
+            if key == "question_text":
+                sources[key] = "原图/用户"
+            elif key == "reference_answer":
+                sources[key] = answer_origin
+            elif key in {"subject_key", "chapter", "knowledge_point", "question_type"} and draft.get("tag_candidates"):
+                sources[key] = "资料候选"
+            else:
+                sources[key] = "模型候选"
+        return sources
+
     def list_intakes(self):
-        rows = self.all("SELECT i.*, b.subject_key, (SELECT COUNT(*) FROM ImageAsset a WHERE a.batch_id=i.batch_id) AS asset_count FROM IntakeItem i JOIN CaptureBatch b ON b.batch_id=i.batch_id ORDER BY i.updated_at DESC, i.created_at DESC")
-        return [{**dict(r), "draft_fields": loads(r["draft_fields"], {})} for r in rows]
+        rows = self.all("SELECT i.*, b.subject_key, b.course_id, c.course_name, c.course_group, (SELECT COUNT(*) FROM ImageAsset a WHERE a.batch_id=i.batch_id) AS asset_count FROM IntakeItem i JOIN CaptureBatch b ON b.batch_id=i.batch_id LEFT JOIN Course c ON c.course_id=b.course_id ORDER BY i.updated_at DESC, i.created_at DESC")
+        return [{**dict(row), "draft_fields": (draft := loads(row["draft_fields"], {})), **self._intake_status(row, draft, row["asset_count"])} for row in rows]
 
     def patch_intake(self, intake_id, payload):
         payload = payload if isinstance(payload, dict) else {}
@@ -603,7 +876,14 @@ class Store:
             confirmed = bool(as_dict(draft).get("confirmed_question_id"))
             confirmed_asset_ids = self._confirmed_asset_ids(draft)
             if isinstance(payload.get("draft_fields"), dict):
-                draft.update(payload["draft_fields"])
+                incoming_fields = payload["draft_fields"]
+                field_sources = dict(draft.get("field_sources")) if isinstance(draft.get("field_sources"), dict) else {}
+                for key in incoming_fields:
+                    if key in {"question_text", "reference_answer", "subject_key", "chapter", "knowledge_point", "question_type", "error_reason", "error_breakpoint", "correct_approach"} and incoming_fields.get(key) != draft.get(key):
+                        field_sources[key] = "用户修改"
+                draft.update(incoming_fields)
+                if field_sources:
+                    draft["field_sources"] = field_sources
                 if confirmed and "subject_key" in payload["draft_fields"]:
                     subject_value = payload["draft_fields"].get("subject_key") or None
                     if subject_value not in SUBJECT_KEYS:
@@ -910,8 +1190,9 @@ class Store:
                     self.conn.execute("INSERT INTO SourcePassage(source_passage_id,source_artifact_id,ordinal,text,page_no,bbox,locator_json,created_at) VALUES(?,?,?,?,?,?,?,?)", (passage_id, artifact_id, ordinal, piece, page_no, dumps(bbox) if bbox is not None else None, dumps(locator), self.clock()))
             # Re-running enrichment must not remove historical passages: a
             # QuestionSourceLink may still cite a trailing row.
-            self.conn.execute("DELETE FROM SourcePassageFTS WHERE source_artifact_id=?", (artifact_id,))
-            self.conn.execute("INSERT INTO SourcePassageFTS(source_passage_id,source_artifact_id,text) SELECT source_passage_id,source_artifact_id,COALESCE(text,'') FROM SourcePassage WHERE source_artifact_id=? ORDER BY ordinal", (artifact_id,))
+            if self.fts_available:
+                self.conn.execute("DELETE FROM SourcePassageFTS WHERE source_artifact_id=?", (artifact_id,))
+                self.conn.execute("INSERT INTO SourcePassageFTS(source_passage_id,source_artifact_id,text) SELECT source_passage_id,source_artifact_id,COALESCE(text,'') FROM SourcePassage WHERE source_artifact_id=? ORDER BY ordinal", (artifact_id,))
             if parse_warning:
                 payload = loads(artifact["raw_payload"], {})
                 if not isinstance(payload, dict): payload = {"raw_payload": payload}
@@ -1101,7 +1382,7 @@ class Store:
             subject_clause = " AND (a.subject_key IS NULL OR a.subject_key IN (" + ",".join("?" for _ in allowed_subjects) + "))"
             subject_args.extend(allowed_subjects)
         fts_rows = []
-        if chunks:
+        if chunks and self.fts_available:
             match = " OR ".join('"' + token.replace('"', '""') + '"' for token in chunks)
             try:
                 fts_rows = self.all(
@@ -1324,7 +1605,7 @@ class Store:
         return fields
 
     def analyze_intake(self, intake_id):
-        row = self.one("SELECT i.*,b.subject_key FROM IntakeItem i JOIN CaptureBatch b ON b.batch_id=i.batch_id WHERE i.intake_id=?", (intake_id,))
+        row = self.one("SELECT i.*,b.subject_key,b.course_id FROM IntakeItem i JOIN CaptureBatch b ON b.batch_id=i.batch_id WHERE i.intake_id=?", (intake_id,))
         if not row: raise DomainError("not_found", "intake not found", {"intake_id": intake_id})
         draft = loads(row["draft_fields"], {})
         confirmed = bool(as_dict(draft).get("confirmed_question_id"))
@@ -1414,22 +1695,24 @@ class Store:
             self.rollback(); raise
         return self._intake_detail(intake_id)
 
-    def _subject_context(self, subject_key, created):
+    def _subject_context(self, subject_key, created, course_id=None):
         """Return a course context for the confirmed subject, creating only
         the minimal local release/objective needed by the existing ledger."""
         subject_key = subject_key if subject_key in SUBJECT_KEYS else None
-        course_key = subject_key or "capture_unspecified"
+        course = self._course(course_id)
+        course_key = course_id or subject_key or "capture_unspecified"
         release = self.one("SELECT * FROM CoursePackRelease WHERE course_key=?", (course_key,))
         if not release:
             release_id, objective_id = uid("release"), uid("lo")
             self.conn.execute("INSERT INTO CoursePackRelease(release_id,course_key,created_at) VALUES(?,?,?)", (release_id, course_key, created))
-            self.conn.execute("INSERT INTO LearningObjective(learning_objective_id,course_pack_release_id,name,description,observable_criteria,created_at) VALUES(?,?,?,?,?,?)", (objective_id, release_id, f"{subject_key or '未指定'}待补充学习目标", "", dumps(["待补充"]), created))
+            label = course["course_name"] if course else (subject_key or "未指定")
+            self.conn.execute("INSERT INTO LearningObjective(learning_objective_id,course_pack_release_id,name,description,observable_criteria,created_at) VALUES(?,?,?,?,?,?)", (objective_id, release_id, f"{label}待补充学习目标", "", dumps(["待补充"]), created))
             return release_id, objective_id
         objective = self.one("SELECT learning_objective_id FROM LearningObjective WHERE course_pack_release_id=? ORDER BY created_at LIMIT 1", (release["release_id"],))
         return release["release_id"], objective["learning_objective_id"] if objective else None
 
     def resolve_intake(self, intake_id):
-        row = self.one("SELECT i.*,b.subject_key FROM IntakeItem i JOIN CaptureBatch b ON b.batch_id=i.batch_id WHERE i.intake_id=?", (intake_id,))
+        row = self.one("SELECT i.*,b.subject_key,b.course_id FROM IntakeItem i JOIN CaptureBatch b ON b.batch_id=i.batch_id WHERE i.intake_id=?", (intake_id,))
         if not row:
             raise DomainError("not_found", "intake not found", {"intake_id": intake_id})
         draft = loads(row["draft_fields"], {})
@@ -1471,7 +1754,7 @@ class Store:
         return self._intake_detail(intake_id)
 
     def confirm_intake(self, intake_id):
-        row = self.one("SELECT i.*,b.subject_key FROM IntakeItem i JOIN CaptureBatch b ON b.batch_id=i.batch_id WHERE i.intake_id=?", (intake_id,))
+        row = self.one("SELECT i.*,b.subject_key,b.course_id FROM IntakeItem i JOIN CaptureBatch b ON b.batch_id=i.batch_id WHERE i.intake_id=?", (intake_id,))
         if not row:
             raise DomainError("not_found", "intake not found", {"intake_id": intake_id})
         draft = loads(row["draft_fields"], {})
@@ -1482,7 +1765,7 @@ class Store:
         created = self.clock(); subject = draft.get("subject_key") if draft.get("subject_key") in SUBJECT_KEYS else row["subject_key"]
         self.begin()
         try:
-            release_id, objective_id = self._subject_context(subject, created)
+            release_id, objective_id = self._subject_context(subject, created, row["course_id"])
             question_id, revision_id, prompt_id = uid("q"), uid("qr"), uid("qpr")
             assets = self.all("SELECT * FROM ImageAsset WHERE batch_id=? AND state='saved' AND path IS NOT NULL ORDER BY ordinal,created_at,asset_id", (row["batch_id"],))
             question_assets = [a for a in assets if a["role"] in ("question", "mixed")]
@@ -1492,12 +1775,20 @@ class Store:
             units = [{"unit_ref":"whole","label":"整题","question_text":question_text,"intake_id":intake_id,"asset_ids":[a["asset_id"] for a in question_assets]}]
             mapping = [{"objective_ref":"obj-1","learning_objective_id":objective_id,"role":"measured","question_unit_refs":["whole"],"origin_kind":"intake_confirm","captured_at":created}]
             selected_source_ids = draft.get("selected_source_passage_ids") if isinstance(draft.get("selected_source_passage_ids"), list) else []
-            grading = {"reference_answer":required["reference_answer"],"error_reason":required["error_reason"],"error_breakpoint":required["error_breakpoint"],"correct_approach":as_text(draft.get("correct_approach")),"subject_key":subject,"chapter":draft.get("chapter"),"knowledge_point":draft.get("knowledge_point"),"question_type":draft.get("question_type"),"intake_id":intake_id,"asset_refs":asset_refs,"selected_question_id":draft.get("selected_question_id"),"selected_source_passage_ids":selected_source_ids,"question_image_status":"已保存题面" if question_assets else "待补题面"}
+            knowledge_node_id = as_text(draft.get("knowledge_node_id")).strip() or None
+            knowledge_node = self.one("SELECT knowledge_node_id,course_id,name FROM KnowledgeNode WHERE knowledge_node_id=? AND confirmation_state!='archived'", (knowledge_node_id,)) if knowledge_node_id else None
+            if knowledge_node_id and not knowledge_node:
+                raise DomainError("invalid_knowledge_node", "knowledge node not found", {"knowledge_node_id": knowledge_node_id})
+            if knowledge_node and knowledge_node["course_id"] != row["course_id"]:
+                raise DomainError("invalid_knowledge_node", "knowledge node is not in the selected course", {"knowledge_node_id": knowledge_node_id})
+            grading = {"reference_answer":required["reference_answer"],"error_reason":required["error_reason"],"error_breakpoint":required["error_breakpoint"],"correct_approach":as_text(draft.get("correct_approach")),"subject_key":subject,"course_id":row["course_id"],"knowledge_node_id":knowledge_node_id,"knowledge_point":knowledge_node["name"] if knowledge_node else draft.get("knowledge_point"),"chapter":draft.get("chapter"),"question_type":draft.get("question_type"),"intake_id":intake_id,"asset_refs":asset_refs,"selected_question_id":draft.get("selected_question_id"),"selected_source_passage_ids":selected_source_ids,"question_image_status":"已保存题面" if question_assets else "待补题面"}
             presentation = {"schema_version":SNAPSHOT,"content":question_text,"blocks":[{"block_ref":"question","kind":"text","content":question_text,"leakage_state":"clean"}],"asset_refs":presentation_refs}
             self.conn.execute("INSERT INTO Question(question_id,course_pack_release_id,current_question_revision_id,lifecycle_state,created_at) VALUES(?,?,?,?,?)", (question_id,release_id,None,"active",created))
             self.conn.execute("INSERT INTO QuestionRevision(question_revision_id,question_id,revision_no,revision_state,supersedes_revision_id,current_review_prompt_revision_id,question_units,objective_mapping_snapshot,grading_reference_fixture_snapshot,help_content_fixture_snapshot,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)", (revision_id,question_id,1,"confirmed",None,None,dumps(units),dumps(mapping),dumps(grading),dumps([]),created))
             self.conn.execute("INSERT INTO ReviewPromptRevision(review_prompt_revision_id,question_id,question_revision_id,revision_no,presentation_snapshot,unresolved_critical_ambiguities,leakage_state,revision_state,created_at) VALUES(?,?,?,?,?,?,?,?,?)", (prompt_id,question_id,revision_id,1,dumps(presentation),dumps([]),"clean","ready",created))
             self.conn.execute("UPDATE Question SET current_question_revision_id=? WHERE question_id=?", (revision_id,question_id)); self.conn.execute("UPDATE QuestionRevision SET current_review_prompt_revision_id=? WHERE question_revision_id=?", (prompt_id,revision_id))
+            if knowledge_node:
+                self.conn.execute("INSERT INTO QuestionKnowledgeLink(question_id,knowledge_node_id,origin,created_at) VALUES(?,?,?,?)", (question_id, knowledge_node["knowledge_node_id"], "user", created))
             process_assets = [a["asset_id"] for a in assets if a["role"] in ("my_process","mixed")]
             response = {"schema_version":SNAPSHOT,"response_text":"","response_selections":[],"response_assets":process_assets,"completion_claim":"unknown","external_help_reported":False,"intake_id":intake_id,"asset_refs":[ref for ref in asset_refs if ref["asset_id"] in process_assets]}
             attempt_id = uid("attempt")
@@ -1567,6 +1858,8 @@ class Store:
         revision = self.one("SELECT * FROM QuestionRevision WHERE question_revision_id=? AND revision_state='confirmed'", (question["current_question_revision_id"],))
         if not revision: return None
         grading = loads(revision["grading_reference_fixture_snapshot"], {})
+        knowledge_nodes = [dict(row) for row in self.all("SELECT n.knowledge_node_id,n.course_id,n.parent_id,n.name,n.aliases,n.confirmation_state,l.origin FROM QuestionKnowledgeLink l JOIN KnowledgeNode n ON n.knowledge_node_id=l.knowledge_node_id WHERE l.question_id=? ORDER BY n.name", (question_id,))]
+        course = self._course(grading.get("course_id"))
         if not grading.get("intake_id"): return None
         data_origin = as_text(grading.get("data_origin")) or "real"
         prompt = self.one("SELECT * FROM ReviewPromptRevision WHERE review_prompt_revision_id=?", (revision["current_review_prompt_revision_id"],))
@@ -1591,7 +1884,7 @@ class Store:
             if draft_attempt_id:
                 draft_assets = self._redo_assets(grading.get("intake_id"), as_list(raw_draft.get("response_assets")))
                 redo_draft = {"attempt_id": draft_attempt_id, "review_session_id": active_session["review_session_id"], "review_task_id": active_session["review_task_id"], "response_text": as_text(raw_draft.get("response_text")), "response_assets": [a["asset_id"] for a in draft_assets], "assets": draft_assets}
-        return {"question_id":question_id,"question":dict(question),"question_revision":dict(revision),"question_text":as_text((presentation.get("content") if isinstance(presentation,dict) else "")),"presentation":presentation,"assets":assets,"editable_assets":editable_assets,"intake_id":grading.get("intake_id"),"reference_assets":reference_assets,"question_image_status":question_image_status,"data_origin":data_origin,"display_label":as_text(grading.get("display_label")) or "真实题目","grading":grading,"sources":sources,"next_due_at":task["due_at"] if task else None,"review_task_id":task["review_task_id"] if task else None,"next_task":self._task_summary(task),"redo_draft":redo_draft,"latest_redo_attempt_id":latest_redo["attempt_id"] if latest_redo else None}
+        return {"question_id":question_id,"question":dict(question),"question_revision":dict(revision),"question_text":as_text((presentation.get("content") if isinstance(presentation,dict) else "")),"presentation":presentation,"assets":assets,"editable_assets":editable_assets,"intake_id":grading.get("intake_id"),"course_id":grading.get("course_id"),"course_name":course["course_name"] if course else None,"course_group":course["course_group"] if course else None,"reference_assets":reference_assets,"question_image_status":question_image_status,"data_origin":data_origin,"display_label":as_text(grading.get("display_label")) or "真实题目","grading":grading,"knowledge_nodes":knowledge_nodes,"sources":sources,"answers":self.get_question_answers(question_id),"next_due_at":task["due_at"] if task else None,"review_task_id":task["review_task_id"] if task else None,"next_task":self._task_summary(task),"redo_draft":redo_draft,"latest_redo_attempt_id":latest_redo["attempt_id"] if latest_redo else None}
 
     def list_wrong_questions(self, filters=None):
         """Return confirmed intake-backed questions, optionally filtered by tags.
@@ -1612,7 +1905,7 @@ class Store:
                 grading = as_dict(item.get("grading"))
                 if any(as_text(grading.get(key)).strip() != value for key, value in filters.items()):
                     continue
-                result.append({"question_id":item["question_id"],"question_text":item["question_text"],"subject_key":grading.get("subject_key"),"chapter":grading.get("chapter"),"knowledge_point":grading.get("knowledge_point"),"question_type":grading.get("question_type"),"asset_count":len(item["assets"]),"reference_answer":grading.get("reference_answer"),"error_reason":grading.get("error_reason"),"next_due_at":item["next_due_at"],"data_origin":item.get("data_origin"),"display_label":item.get("display_label")})
+                result.append({"question_id":item["question_id"],"question_text":item["question_text"],"subject_key":grading.get("subject_key"),"course_id":item.get("course_id"),"course_name":item.get("course_name"),"chapter":grading.get("chapter"),"knowledge_point":grading.get("knowledge_point"),"question_type":grading.get("question_type"),"asset_count":len(item["assets"]),"reference_answer":grading.get("reference_answer"),"error_reason":grading.get("error_reason"),"next_due_at":item["next_due_at"],"data_origin":item.get("data_origin"),"display_label":item.get("display_label")})
         return result
 
     def get_wrong_question(self, question_id):
@@ -1967,14 +2260,19 @@ class Store:
         context = "\n\n".join(context_parts)
         if not context:
             context = "（没有可用的资料出处）"
+        conversation = self.get_question_answers(question_id, limit=6) if question_id else []
+        conversation_context = "\n\n".join(
+            f"第 {index} 轮\n用户：{as_text(item.get('query'))}\n助手：{as_text(item.get('answer'))[:2000]}"
+            for index, item in enumerate(conversation, 1)
+        ) or "（这是第一轮提问）"
         messages = [
-            {"role": "system", "content": "请用普通文本回答问题。只把给定资料作为参考，不要编造引用编号。"},
-            {"role": "user", "content": f"题面：{question_text or '（未提供题面）'}\n问题：{query or '（未提供问题）'}\n资料上下文：\n{context}"},
+            {"role": "system", "content": "请用普通文本回答问题。只把给定资料作为参考，不要编造引用编号。保留对话上下文，但不要把先前回答当成不可修改的权威事实。"},
+            {"role": "user", "content": f"题面：{question_text or '（未提供题面）'}\n问题：{query or '（未提供问题）'}\n此前对话：\n{conversation_context}\n资料上下文：\n{context}"},
         ]
         answer_text, model_provider, available, error = self._llm_chat(messages)
         status = "unavailable" if not available else "grounded" if sources else "unlocated"
         answer_id = uid("answer")
-        source_snapshot = {"question_id": question_id, "requested_question_id": requested_question_id, "query": query, "retrieval_query": retrieval_query, "sources": sources, "context": context}
+        source_snapshot = {"question_id": question_id, "requested_question_id": requested_question_id, "query": query, "retrieval_query": retrieval_query, "sources": sources, "context": context, "conversation_turn": len(conversation) + 1}
         if error:
             source_snapshot["error"] = error
         self.begin()
@@ -1992,6 +2290,31 @@ class Store:
             return None
         result = dict(row)
         result["source_snapshot"] = loads(result.get("source_snapshot"), {})
+        return result
+
+    def get_question_answers(self, question_id, limit=30):
+        question = self.one("SELECT question_id FROM Question WHERE question_id=?", (question_id,))
+        if not question:
+            raise DomainError("not_found", "question not found", {"question_id": question_id})
+        try:
+            limit = max(1, min(int(limit), 100))
+        except (TypeError, ValueError):
+            limit = 30
+        rows = self.all("SELECT * FROM Answer WHERE question_id=? ORDER BY created_at,rowid LIMIT ?", (question_id, limit))
+        result = []
+        for row in rows:
+            snapshot = loads(row["source_snapshot"], {})
+            result.append({
+                "answer_id": row["answer_id"],
+                "question_id": row["question_id"],
+                "query": row["query"],
+                "answer": row["answer_text"],
+                "status": row["status"],
+                "model_provider": row["model_provider"],
+                "created_at": row["created_at"],
+                "sources": as_list(as_dict(snapshot).get("sources")),
+                "error": as_text(as_dict(snapshot).get("error")),
+            })
         return result
 
     # ---------- scheduling ----------
@@ -2215,6 +2538,16 @@ class Store:
                 self.conn.execute("UPDATE ReviewSession SET draft_payload_snapshot=?,updated_at=?,status=CASE WHEN status='abandoned' THEN 'active' ELSE status END,ended_at=CASE WHEN status='abandoned' THEN NULL ELSE ended_at END WHERE review_session_id=?", (dumps(draft), self.clock(), session_id))
                 self.commit()
                 return {"review_session_id": session_id, "updated_at": self.clock(), "draft": draft}
+            if action == "self_assess":
+                state = as_text(payload.get("state")).strip()
+                if state not in {"know", "dont_know", "uncertain", "full_redo"}:
+                    raise DomainError("invalid_self_assessment", "state must be know, dont_know, uncertain, or full_redo")
+                draft = self._draft(loads(session["draft_payload_snapshot"], {}))
+                draft["self_assessment"] = state
+                draft["full_redo_requested"] = state == "full_redo" or bool(payload.get("full_redo"))
+                self.conn.execute("UPDATE ReviewSession SET draft_payload_snapshot=?,updated_at=?,status=CASE WHEN status='abandoned' THEN 'active' ELSE status END,ended_at=CASE WHEN status='abandoned' THEN NULL ELSE ended_at END WHERE review_session_id=?", (dumps(draft), self.clock(), session_id))
+                self.commit()
+                return {"review_session_id": session_id, "status": "active", "self_assessment": state, "full_redo_requested": draft["full_redo_requested"], "draft": draft}
             if action == "expose":
                 event_type = payload.get("event_type") if payload.get("event_type") in {"hint_revealed", "answer_revealed"} else "hint_revealed"
                 content_ref = as_text(payload.get("content_ref"), "unlocated")
@@ -2417,6 +2750,142 @@ class Store:
             objectives.append(item)
         return {"review_items": items, "learner_objectives": objectives}
 
+    def knowledge_navigation(self, filters=None):
+        filters = as_dict(filters)
+        subject_filter = as_text(filters.get("subject_key")).strip()
+        chapter_filter = as_text(filters.get("chapter")).strip()
+        knowledge_filter = as_text(filters.get("knowledge_point")).strip()
+        subjects = {}
+        question_count = 0
+        source_count = 0
+        rows = self.all("SELECT q.question_id,qr.question_revision_id,qr.question_units,qr.grading_reference_fixture_snapshot FROM Question q JOIN QuestionRevision qr ON qr.question_revision_id=q.current_question_revision_id WHERE qr.revision_state='confirmed' ORDER BY q.created_at,q.question_id")
+        labels = {"math": "数学", "english": "英语", "politics": "政治", "professional": "专业课", "unclassified": "未分类"}
+        for row in rows:
+            grading = as_dict(loads(row["grading_reference_fixture_snapshot"], {}))
+            subject = as_text(grading.get("subject_key")).strip() or "unclassified"
+            chapter = as_text(grading.get("chapter")).strip() or "待补充"
+            knowledge = as_text(grading.get("knowledge_point")).strip() or "待补充"
+            if subject_filter and subject != subject_filter:
+                continue
+            if chapter_filter and chapter != chapter_filter:
+                continue
+            if knowledge_filter and knowledge != knowledge_filter:
+                continue
+            units = loads(row["question_units"], [])
+            if isinstance(units, list) and units and isinstance(units[0], dict):
+                question_text = as_text(units[0].get("question_text"))
+            else:
+                question_text = as_text(as_dict(units).get("question_text"))
+            links = self.get_question_sources(row["question_id"])
+            source_count += len(links)
+            attempts = self.all("SELECT attempt_id,origin_kind,submitted_at,completion_claim,response_snapshot FROM Attempt WHERE question_id=? AND submission_state='submitted' ORDER BY submitted_at", (row["question_id"],))
+            attempt_items = []
+            for attempt in attempts:
+                response = as_dict(loads(attempt["response_snapshot"], {}))
+                assessment = self.one("SELECT result FROM Assessment WHERE attempt_id=? AND status='final' ORDER BY created_at DESC LIMIT 1", (attempt["attempt_id"],))
+                attempt_items.append({"attempt_id": attempt["attempt_id"], "origin_kind": attempt["origin_kind"], "submitted_at": attempt["submitted_at"], "completion_claim": attempt["completion_claim"], "result": assessment["result"] if assessment else None, "response_text": as_text(response.get("response_text"))})
+            item = {
+                "question_id": row["question_id"],
+                "question_text": question_text or "待补题面",
+                "error_reason": as_text(grading.get("error_reason")),
+                "error_breakpoint": as_text(grading.get("error_breakpoint")),
+                "attempts": attempt_items,
+                "sources": [{"source_passage_id": link.get("source_passage_id"), "source_artifact_id": link.get("source_artifact_id"), "text": link.get("text"), "page_no": link.get("page_no"), "locator_json": link.get("locator_json")} for link in links],
+            }
+            subject_node = subjects.setdefault(subject, {"subject_key": subject, "label": labels.get(subject, subject), "chapters": {}})
+            chapter_node = subject_node["chapters"].setdefault(chapter, {"chapter": chapter, "knowledge_points": {}})
+            knowledge_node = chapter_node["knowledge_points"].setdefault(knowledge, {"knowledge_point": knowledge, "questions": [], "sources": []})
+            knowledge_node["questions"].append(item)
+            for source in item["sources"]:
+                if source not in knowledge_node["sources"]:
+                    knowledge_node["sources"].append(source)
+            question_count += 1
+        subject_items = []
+        for subject in subjects.values():
+            chapters = []
+            for chapter in subject["chapters"].values():
+                chapter["knowledge_points"] = list(chapter["knowledge_points"].values())
+                chapters.append(chapter)
+            subject["chapters"] = chapters
+            subject_items.append(subject)
+        return {"subjects": subject_items, "question_count": question_count, "source_count": source_count}
+
+    def weak_points(self):
+        from collections import defaultdict
+        aggregates = defaultdict(lambda: {"count": 0, "question_ids": [], "examples": []})
+        rows = self.all("SELECT q.question_id,qr.question_units,qr.grading_reference_fixture_snapshot FROM Question q JOIN QuestionRevision qr ON qr.question_revision_id=q.current_question_revision_id WHERE qr.revision_state='confirmed'")
+        for row in rows:
+            grading = as_dict(loads(row["grading_reference_fixture_snapshot"], {}))
+            question_id = row["question_id"]
+            units = loads(row["question_units"], [])
+            question_text = as_text(units[0].get("question_text")) if isinstance(units, list) and units and isinstance(units[0], dict) else as_text(as_dict(units).get("question_text"))
+            for kind, key in (("错误原因", "error_reason"), ("首次断点", "error_breakpoint")):
+                label = as_text(grading.get(key)).strip()
+                if not label or label == "待补充":
+                    continue
+                label = label.splitlines()[0][:120]
+                entry = aggregates[(kind, label)]
+                entry["count"] += 1
+                if question_id not in entry["question_ids"]:
+                    entry["question_ids"].append(question_id)
+                if len(entry["examples"]) < 3:
+                    entry["examples"].append({"question_id": question_id, "question_text": question_text or "待补题面"})
+            incomplete = self.one("SELECT COUNT(*) AS count FROM Attempt WHERE question_id=? AND submission_state='submitted' AND completion_claim!='complete'", (question_id,))["count"]
+            if incomplete:
+                entry = aggregates[("过程不完整", "过程不完整")]
+                entry["count"] += incomplete
+                if question_id not in entry["question_ids"]:
+                    entry["question_ids"].append(question_id)
+        result = []
+        for (kind, label), item in aggregates.items():
+            result.append({"kind": kind, "label": label, **item})
+        result.sort(key=lambda item: (-item["count"], item["kind"], item["label"]))
+        return result
+
+    def export_wrong_questions(self, question_ids=None, include_answers=True):
+        wanted = {value for value in as_list(question_ids) if isinstance(value, str)}
+        rows = self.list_wrong_questions()
+        if wanted:
+            rows = [row for row in rows if row["question_id"] in wanted]
+        lines = ["# 错题本" if include_answers else "# 无答案自测", ""]
+        for index, row in enumerate(rows, 1):
+            detail = self.get_wrong_question(row["question_id"])
+            grading = as_dict(detail.get("grading"))
+            lines.extend([f"## {index}. {detail.get('question_text') or '待补题面'}", ""])
+            lines.append(f"- 题目 ID：`{row['question_id']}`")
+            lines.append(f"- 科目：{grading.get('subject_key') or '未分类'}")
+            lines.append(f"- 章节：{grading.get('chapter') or '待补充'}")
+            lines.append(f"- 知识点：{grading.get('knowledge_point') or '待补充'}")
+            for asset in detail.get("assets", []):
+                lines.append(f"- 题面图片：![{asset.get('original_filename', 'image')}]({asset.get('media_url')})")
+            if include_answers:
+                lines.extend(["", f"**参考答案**：{grading.get('reference_answer') or '待补充'}", f"**错误原因**：{grading.get('error_reason') or '待补充'}", f"**解题断点**：{grading.get('error_breakpoint') or '待补充'}", f"**正确思路**：{grading.get('correct_approach') or '待补充'}"])
+            lines.append("\n---\n")
+        return "\n".join(lines).rstrip() + "\n"
+
+    def similar_practice(self, payload):
+        payload = as_dict(payload)
+        question_id = as_text(payload.get("question_id")).strip()
+        if not question_id:
+            raise DomainError("invalid_question", "question_id is required")
+        detail = self.get_wrong_question(question_id)
+        grading = as_dict(detail.get("grading"))
+        prompt = "\n".join([
+            "请为下面这道考研错题生成一道难度和知识点相近、但题面不同的练习题。",
+            "只输出普通文本，明确写出‘练习题’和‘参考答案’两个部分；这是候选草稿，不要声称它已进入错题本。",
+            f"原题：{detail.get('question_text') or '待补题面'}",
+            f"科目：{grading.get('subject_key') or '未分类'}；章节：{grading.get('chapter') or '待补充'}；知识点：{grading.get('knowledge_point') or '待补充'}",
+            f"原题错误原因：{grading.get('error_reason') or '待补充'}；断点：{grading.get('error_breakpoint') or '待补充'}",
+            f"用户补充要求：{as_text(payload.get('instruction')) or '保持同一知识点并更换数字或情境'}",
+        ])
+        raw, provider, errors = self._invoke_with_fallback(prompt, [])
+        if not raw:
+            return {"status": "failed", "error": "；".join(errors)[:500] or "provider unavailable", "provider": provider}
+        fields = self._extract_analysis(raw, grading.get("subject_key"))
+        candidate = as_text(fields.get("question_text")).strip() or raw.strip()
+        reference_answer = as_text(fields.get("reference_answer")).strip()
+        return {"status": "draft", "question_text": candidate, "reference_answer": reference_answer, "raw": raw, "provider": provider, "save_payload": {"source_question_id": question_id, "subject_key": grading.get("subject_key"), "question_text": candidate, "reference_answer": reference_answer, "raw": raw}}
+
     def get_session(self, session_id):
         row = self.one("SELECT * FROM ReviewSession WHERE review_session_id=?", (session_id,))
         return self._session_dto(row) if row else None
@@ -2433,6 +2902,7 @@ class Store:
             "attempts": [dict(row) for row in self.all("SELECT * FROM Attempt WHERE question_id=? ORDER BY submitted_at", (question_id,))],
             "assessments": [dict(row) for row in self.all("SELECT * FROM Assessment WHERE question_id=? ORDER BY created_at", (question_id,))],
             "sources": self.get_question_sources(question_id),
+            "answers": self.get_question_answers(question_id),
         }
 
     def north_star_events(self):
@@ -2488,6 +2958,14 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _text(self, status, body, content_type="text/plain; charset=utf-8"):
+        data = body.encode("utf-8") if isinstance(body, str) else body
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
     def _multipart(self):
         length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(length)
@@ -2520,6 +2998,27 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, {"data": self.store.get_due_reviews()})
             if path == "/api/projections":
                 return self._json(200, {"data": self.store.projections()})
+            if path == "/api/courses":
+                return self._json(200, {"data": self.store.list_courses()})
+            if path == "/api/knowledge-nodes":
+                query = parse_qs(urlparse(self.path).query, keep_blank_values=True)
+                course_id = query.get("course_id", [None])[0]
+                return self._json(200, {"data": self.store.list_knowledge_nodes(course_id)})
+            if path == "/api/question-bank":
+                query = parse_qs(urlparse(self.path).query, keep_blank_values=True)
+                filters = {key: values[0] for key, values in query.items() if values}
+                return self._json(200, {"data": self.store.list_question_bank(filters)})
+            if path == "/api/knowledge":
+                query = parse_qs(urlparse(self.path).query, keep_blank_values=True)
+                filters = {key: values[0] for key, values in query.items() if values}
+                return self._json(200, {"data": self.store.knowledge_navigation(filters)})
+            if path == "/api/insights/weak-points":
+                return self._json(200, {"data": self.store.weak_points()})
+            if path == "/api/export/wrong-questions":
+                query = parse_qs(urlparse(self.path).query, keep_blank_values=True)
+                question_ids = query.get("question_id", [])
+                include_answers = query.get("answers", ["1"])[0] not in {"0", "false", "no"}
+                return self._text(200, self.store.export_wrong_questions(question_ids, include_answers), "text/markdown; charset=utf-8")
             if path == "/api/north-star":
                 return self._json(200, {"data": self.store.north_star_events()})
             if path == "/api/intake":
@@ -2536,6 +3035,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, {"data": self.store.list_wrong_questions(filters)})
             if path.startswith("/api/attempts/"):
                 return self._json(200, {"data": self.store.get_attempt(path.rsplit("/", 1)[1])})
+            if path.startswith("/api/wrong-questions/") and path.endswith("/similar"):
+                question_id = path[len("/api/wrong-questions/"):-len("/similar")].strip("/")
+                return self._json(200, {"data": self.store.similar_question_bank(question_id)})
             if path.startswith("/api/wrong-questions/"):
                 return self._json(200, {"data": self.store.get_wrong_question(path.rsplit("/", 1)[1])})
             if path.startswith("/api/intake/"):
@@ -2564,6 +3066,9 @@ class Handler(BaseHTTPRequestHandler):
             if path.startswith("/api/question/") and path.endswith("/sources"):
                 question_id = path[len("/api/question/") : -len("/sources")].rstrip("/")
                 return self._json(200, {"data": self.store.get_question_sources(question_id)})
+            if path.startswith("/api/question/") and path.endswith("/answers"):
+                question_id = path[len("/api/question/") : -len("/answers")].rstrip("/")
+                return self._json(200, {"data": self.store.get_question_answers(question_id)})
             if path.startswith("/api/question/"):
                 return self._json(200, {"data": self.store.get_history(path.rsplit("/", 1)[1])})
             if path.startswith("/api/source/"):
@@ -2593,7 +3098,25 @@ class Handler(BaseHTTPRequestHandler):
                 if path == "/api/capture/source":
                     return self._json(200, {"data": self.store.capture_source(values, files)})
                 if path == "/api/intake/batches":
-                    return self._json(200, {"data": self.store.create_intake_batch(files, values.get("subject_key") or None)})
+                    return self._json(200, {"data": self.store.create_intake_batch(files, values.get("subject_key") or None, values.get("course_id") or None)})
+                if path == "/api/question-bank/import":
+                    if not files:
+                        raise DomainError("invalid_question_bank", "CSV or JSON file is required")
+                    upload = files[0]
+                    try:
+                        raw = (upload.get("data") or b"").decode("utf-8-sig")
+                        if (upload.get("filename") or "").lower().endswith(".json"):
+                            parsed = json.loads(raw)
+                            rows = parsed.get("items", parsed) if isinstance(parsed, dict) else parsed
+                        else:
+                            rows = list(csv.DictReader(io.StringIO(raw)))
+                    except (UnicodeDecodeError, ValueError, csv.Error) as error:
+                        raise DomainError("invalid_question_bank", f"cannot parse question bank: {error}")
+                    if not isinstance(rows, list):
+                        raise DomainError("invalid_question_bank", "question bank must contain a list of rows")
+                    fallback_course = values.get("course_id") or None
+                    rows = [{**as_dict(row), **({"course_id": fallback_course} if fallback_course and not row.get("course_id") else {})} for row in rows]
+                    return self._json(200, {"data": self.store.import_question_bank({"items": rows})})
                 if path.startswith("/api/wrong-questions/") and path.endswith("/redo"):
                     question_id = path[len("/api/wrong-questions/"):-len("/redo")].strip("/")
                     return self._json(200, {"data": self.store.redo_upload(question_id, files, values)})
@@ -2602,7 +3125,16 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json(200, {"data": self.store.append_intake_assets(intake_id, files)})
                 payload = values
             if path == "/api/intake/batches":
-                return self._json(200, {"data": self.store.create_intake_batch([], payload.get("subject_key"))})
+                return self._json(200, {"data": self.store.create_intake_batch([], payload.get("subject_key"), payload.get("course_id"))})
+            if path == "/api/courses":
+                return self._json(200, {"data": self.store.create_course(payload)})
+            if path == "/api/knowledge-nodes":
+                return self._json(200, {"data": self.store.create_knowledge_node(payload)})
+            if path == "/api/question-bank/import":
+                return self._json(200, {"data": self.store.import_question_bank(payload)})
+            if path.startswith("/api/wrong-questions/") and path.endswith("/similar"):
+                question_id = path[len("/api/wrong-questions/"):-len("/similar")].strip("/")
+                return self._json(200, {"data": self.store.similar_question_bank(question_id)})
             if path.startswith("/api/wrong-questions/") and path.endswith("/redo"):
                 question_id = path[len("/api/wrong-questions/"):-len("/redo")].strip("/")
                 return self._json(200, {"data": self.store.redo_upload(question_id, [], payload)})
@@ -2626,8 +3158,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, {"data": self.store.enrich_source(payload.get("source_artifact_id"))})
             if path == "/api/capture/question":
                 return self._json(200, {"data": self.store.capture_question(payload)})
+            if path == "/api/intake/candidates":
+                return self._json(200, {"data": self.store.create_intake_candidate(payload)})
             if path == "/api/answer":
                 return self._json(200, {"data": self.store.answer_question(payload)})
+            if path == "/api/practice/similar":
+                return self._json(200, {"data": self.store.similar_practice(payload)})
             if path == "/api/question-source-link":
                 return self._json(200, {"data": self.store.link_question_source(payload)})
             if path == "/api/schedule":
