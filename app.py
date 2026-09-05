@@ -316,6 +316,36 @@ class Store:
             self.rollback()
             raise
 
+    def update_knowledge_node(self, knowledge_node_id, payload):
+        payload = as_dict(payload)
+        row = self.one("SELECT * FROM KnowledgeNode WHERE knowledge_node_id=?", (knowledge_node_id,))
+        if not row:
+            raise DomainError("not_found", "knowledge node not found", {"knowledge_node_id": knowledge_node_id})
+        state = as_text(payload.get("confirmation_state", row["confirmation_state"])).strip() or row["confirmation_state"]
+        if state not in {"candidate", "confirmed", "archived"}:
+            raise DomainError("invalid_knowledge_node", "confirmation_state is invalid")
+        name = as_text(payload.get("name", row["name"])).strip()
+        if not name and state != "archived":
+            raise DomainError("invalid_knowledge_node", "name is required")
+        parent_id = as_text(payload.get("parent_id", row["parent_id"])).strip() or None
+        if parent_id:
+            if parent_id == knowledge_node_id:
+                raise DomainError("invalid_parent", "a knowledge node cannot parent itself")
+            parent = self.one("SELECT knowledge_node_id FROM KnowledgeNode WHERE knowledge_node_id=? AND course_id=? AND confirmation_state!='archived'", (parent_id, row["course_id"]))
+            if not parent:
+                raise DomainError("invalid_parent", "parent_id is not in the same course")
+        aliases = as_list(payload.get("aliases", loads(row["aliases"], [])))
+        origin = "user" if state == "confirmed" else row["origin"]
+        self.begin()
+        try:
+            self.conn.execute("UPDATE KnowledgeNode SET parent_id=?,name=?,aliases=?,origin=?,confirmation_state=? WHERE knowledge_node_id=?", (parent_id, name or row["name"], dumps(aliases), origin, state, knowledge_node_id))
+            updated = self.one("SELECT * FROM KnowledgeNode WHERE knowledge_node_id=?", (knowledge_node_id,))
+            self.commit()
+            return dict(updated)
+        except Exception:
+            self.rollback()
+            raise
+
     def _ensure_knowledge_candidates(self, course_id, candidates):
         """Materialize chapter/knowledge labels as reviewable candidate nodes."""
         course_id = as_text(course_id).strip()
@@ -3611,6 +3641,11 @@ class Handler(BaseHTTPRequestHandler):
                 length = int(self.headers.get("Content-Length", 0))
                 payload = loads(self.rfile.read(length) or b"{}", {})
                 return self._json(200, {"data": self.store.bulk_update_question_bank(payload)})
+            if path.startswith("/api/knowledge-nodes/"):
+                length = int(self.headers.get("Content-Length", 0))
+                payload = loads(self.rfile.read(length) or b"{}", {})
+                node_id = path[len("/api/knowledge-nodes/"):].strip("/")
+                return self._json(200, {"data": self.store.update_knowledge_node(node_id, payload)})
             if path.startswith("/api/question-bank/"):
                 length = int(self.headers.get("Content-Length", 0))
                 payload = loads(self.rfile.read(length) or b"{}", {})

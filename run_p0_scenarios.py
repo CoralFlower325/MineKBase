@@ -226,6 +226,8 @@ def run_knowledge_candidate_smoke():
             nodes = resolved["draft_fields"]["knowledge_node_candidates"]
             point = next(node for node in nodes if node["name"] == "二叉树遍历")
             assert point["confirmation_state"] == "candidate" and point["course_id"] == course["course_id"]
+            promoted = store.update_knowledge_node(point["knowledge_node_id"], {"confirmation_state": "confirmed"})
+            assert promoted["confirmation_state"] == "confirmed" and promoted["origin"] == "user"
             store.patch_intake(intake["intake_id"], {"draft_fields": {"knowledge_node_id": point["knowledge_node_id"]}})
             confirmed = store.confirm_intake(intake["intake_id"])
             state = store.one("SELECT confirmation_state FROM KnowledgeNode WHERE knowledge_node_id=?", (point["knowledge_node_id"],))[0]
