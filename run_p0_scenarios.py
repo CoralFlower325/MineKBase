@@ -231,6 +231,9 @@ def run_knowledge_candidate_smoke():
             assert point["confirmation_state"] == "candidate" and point["course_id"] == course["course_id"]
             promoted = store.update_knowledge_node(point["knowledge_node_id"], {"confirmation_state": "confirmed"})
             assert promoted["confirmation_state"] == "confirmed" and promoted["origin"] == "user"
+            ignored = store.create_knowledge_node({"course_id": course["course_id"], "name": "不相关候选", "origin": "source_heading"})
+            archived = store.update_knowledge_node(ignored["knowledge_node_id"], {"confirmation_state": "archived"})
+            assert archived["confirmation_state"] == "archived"
             store.patch_intake(intake["intake_id"], {"draft_fields": {"knowledge_node_id": point["knowledge_node_id"]}})
             confirmed = store.confirm_intake(intake["intake_id"])
             state = store.one("SELECT confirmation_state FROM KnowledgeNode WHERE knowledge_node_id=?", (point["knowledge_node_id"],))[0]
