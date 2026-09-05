@@ -82,6 +82,9 @@ def run_image_smoke():
             self_test_export = store.export_wrong_questions(include_answers=False)
             assert "### 作答与回测记录" in answer_export and "回测 1" in answer_export and "redo" in answer_export
             assert "回测错误类型：推导或计算出错" not in self_test_export and "redo" in self_test_export
+            history = store.get_wrong_question(question_id)["attempts"]
+            assert len(history) == 2 and history[0]["origin_kind"] == "initial" and history[1]["origin_kind"] == "review"
+            assert history[1]["response_text"] == "redo" and history[1]["response_assets"]
             edited_comparison = store.patch_attempt_draft(submitted["attempt_id"], {"error_type": "derivation_calculation"})
             assert edited_comparison["comparison_draft"]["error_type"] == "derivation_calculation"
             try:

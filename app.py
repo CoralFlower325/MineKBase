@@ -2539,7 +2539,7 @@ class Store:
             if draft_attempt_id:
                 draft_assets = self._redo_assets(grading.get("intake_id"), as_list(raw_draft.get("response_assets")))
                 redo_draft = {"attempt_id": draft_attempt_id, "review_session_id": active_session["review_session_id"], "review_task_id": active_session["review_task_id"], "response_text": as_text(raw_draft.get("response_text")), "response_assets": [a["asset_id"] for a in draft_assets], "assets": draft_assets}
-        return {"question_id":question_id,"question":dict(question),"question_revision":dict(revision),"question_text":as_text((presentation.get("content") if isinstance(presentation,dict) else "")),"presentation":presentation,"assets":assets,"process_assets":process_assets,"editable_assets":editable_assets,"intake_id":grading.get("intake_id"),"course_id":grading.get("course_id"),"course_name":course["course_name"] if course else None,"course_group":course["course_group"] if course else None,"reference_assets":reference_assets,"question_image_status":question_image_status,"data_origin":data_origin,"display_label":as_text(grading.get("display_label")) or "真实题目","grading":grading,"knowledge_nodes":knowledge_nodes,"sources":sources,"answers":self.get_question_answers(question_id),"next_due_at":task["due_at"] if task else None,"review_task_id":task["review_task_id"] if task else None,"next_task":self._task_summary(task),"redo_draft":redo_draft,"latest_redo_attempt_id":latest_redo["attempt_id"] if latest_redo else None}
+        return {"question_id":question_id,"question":dict(question),"question_revision":dict(revision),"question_text":as_text((presentation.get("content") if isinstance(presentation,dict) else "")),"presentation":presentation,"assets":assets,"process_assets":process_assets,"editable_assets":editable_assets,"intake_id":grading.get("intake_id"),"course_id":grading.get("course_id"),"course_name":course["course_name"] if course else None,"course_group":course["course_group"] if course else None,"reference_assets":reference_assets,"question_image_status":question_image_status,"data_origin":data_origin,"display_label":as_text(grading.get("display_label")) or "真实题目","grading":grading,"knowledge_nodes":knowledge_nodes,"sources":sources,"answers":self.get_question_answers(question_id),"attempts":self._submitted_attempts(question_id),"next_due_at":task["due_at"] if task else None,"review_task_id":task["review_task_id"] if task else None,"next_task":self._task_summary(task),"redo_draft":redo_draft,"latest_redo_attempt_id":latest_redo["attempt_id"] if latest_redo else None}
 
     def list_wrong_questions(self, filters=None):
         """Return confirmed intake-backed questions, optionally filtered by tags.
@@ -2706,6 +2706,13 @@ class Store:
         # edits may annotate an asset, but cannot hide or reorder it here.
         return [self._asset_dict(by_id[asset_id]) for asset_id in wanted if asset_id in by_id]
 
+    def _submitted_attempts(self, question_id):
+        rows = self.all(
+            "SELECT * FROM Attempt WHERE question_id=? AND submission_state='submitted' ORDER BY submitted_at,created_at,attempt_id",
+            (question_id,),
+        )
+        return [self._attempt_dto(row) for row in rows]
+
     def _attempt_dto(self, attempt):
         attempt = dict(attempt)
         response = as_dict(loads(attempt.get("response_snapshot"), {}))
@@ -2721,9 +2728,11 @@ class Store:
         next_task = self.one("SELECT * FROM ReviewTask WHERE question_id=? AND status='open' ORDER BY due_at, review_round, created_at LIMIT 1", (attempt["question_id"],))
         return {
             "attempt_id": attempt["attempt_id"], "question_id": attempt["question_id"],
+            "origin_kind": attempt.get("origin_kind"),
             "review_task_id": session["review_task_id"] if session else None,
             "review_session_id": attempt.get("review_session_id"), "status": attempt.get("submission_state"),
             "submitted_at": attempt.get("submitted_at"),
+            "completion_claim": attempt.get("completion_claim"),
             "response_text": as_text(response.get("response_text")),
             "response_assets": self._attempt_asset_rows(response.get("response_assets")),
             "initial_process": {"response_text": as_text(initial_response.get("response_text")), "response_assets": self._attempt_asset_rows(initial_response.get("response_assets"))},
